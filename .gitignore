@@ -1,0 +1,3 @@
+# Rust build output (143M+; never tracked). Cargo.lock IS tracked (the crate
+# ships a binary, and it pins the test-only serde_json dev-dependency).
+/target

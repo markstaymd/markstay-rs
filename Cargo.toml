@@ -1,0 +1,35 @@
+[package]
+name = "markstay"
+version = "0.1.0"
+edition = "2021"
+description ="Reference Rust implementation of the markstay spec (v1.1, parser-free core): a source-level identity primitive for Markdown blocks. Zero runtime dependencies, no_std + alloc."
+authors = ["markstaymd <markstaymd@users.noreply.github.com>"]
+license = "MIT"
+homepage = "https://markstay.org"
+repository = "https://github.com/markstaymd/markstay-rs"
+readme = "README.md"
+keywords = ["markdown", "identity", "block", "diff", "linter"]
+categories = ["text-processing", "no-std"]
+exclude = ["/target"]
+
+# The core library is dependency-free and `alloc`-only (no_std-friendly): the
+# vendored SHA-256 (src/sha256.rs, public domain) replaces a `sha2` dependency,
+# and the marker scanner is hand-rolled rather than pulling `regex`. serde_json
+# is a TEST-ONLY dependency (the conformance corpus loader); it never enters the
+# shipped crate.
+[dependencies]
+
+[dev-dependencies]
+serde_json = "1"
+
+[lib]
+name = "markstay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "markstay"
+path = "src/bin/markstay.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
