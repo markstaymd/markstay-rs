@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod hash;
+pub mod id;
 pub mod lint;
 pub mod markers;
 pub mod parse;
@@ -23,6 +24,7 @@ pub mod ratio;
 pub mod resolve;
 pub mod segment;
 pub mod sha256;
+pub mod stamp;
 pub mod text;
 
 // --- public API re-exports (snake_case mirror of the JS surface) -------------
@@ -30,9 +32,16 @@ pub mod text;
 pub use hash::{body_hash, normalize_body};
 pub use text::ascii_trim;
 
-pub use markers::{find_markers, strip_markers, Marker, Syntax};
+pub use markers::{find_markers, rewrite_markers, strip_markers, Marker, Syntax};
 pub use segment::segment_blank_line;
 pub use parse::{parse_document, Block};
+
+pub use id::{is_id_charset, mint_id, DEFAULT_ALPHABET, DEFAULT_ID_LENGTH};
+pub use stamp::{
+    format_attr_value, format_marker, repair_duplicates, restamp, stamp, FormatError, Minted,
+    Renamed, RepairResult, RestampOptions, RestampResult, StampOptions, StampResult,
+    DEFAULT_HASH_LENGTH,
+};
 
 pub use lint::{
     has_errors, lint_blocks, lint_diff, lint_diff_blocks, lint_document, sort_findings, Finding,

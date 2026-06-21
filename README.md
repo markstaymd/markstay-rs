@@ -96,20 +96,32 @@ Public API (mirrors the JS `index.js` surface, snake_case): `normalize_body`,
 `build_anchors_from_blocks` / `resolve_over_blocks` are the segmentation-neutral
 surfaces (a tree adapter's entry points).
 
+The write path (SPEC.md §6/§7/§8) adds `mint_id`, `format_marker`,
+`format_attr_value`, `rewrite_markers`, `stamp`, `restamp`, `repair_duplicates`
+(with `StampOptions` / `RestampOptions` and the `DEFAULT_HASH_LENGTH` /
+`DEFAULT_ALPHABET` / `DEFAULT_ID_LENGTH` constants). `mint_id` takes an injected
+byte source, so the core never calls the OS and stays `no_std`.
+
 ## CLI
 
-A single static binary, suitable as a pre-commit / CI gate:
+A single static binary, suitable as a pre-commit / CI gate. Same subcommand
+grammar as the npm and PyPI `markstay` CLIs:
 
 ```sh
-markstay FILE [FILE ...]            # well-formedness + intra-doc checks (§7/§8/§10)
-markstay --before OLD.md NEW.md     # regeneration diff (§11)
-markstay --json ...                 # machine-readable findings
+markstay lint    FILE...              # well-formedness + intra-doc checks (§7/§8/§10)
+markstay lint    --before OLD.md NEW  # regeneration diff (§11)
+markstay lint    --json ...           # machine-readable findings
+markstay stamp   FILE... [-w]         # mint ids for unmarked blocks (§6)
+markstay restamp FILE... [-w]         # refresh drifted hashes (§8)
+markstay repair  FILE... [-w]         # mint fresh ids for duplicate ids (§7)
 ```
 
-Exit status is non-zero when any error-level finding is reported.
+`lint` exits non-zero when any error-level finding is reported. The write verbs
+print the result to stdout by default; `-w`/`--write` edits files in place
+(required for more than one file).
 
 ```sh
-$ markstay --before old.md new.md
+$ markstay lint --before old.md new.md
 old.md -> new.md:
   [error] DROPPED_ID           -  id b was in the baseline but is gone after the edit (silent loss)
   -> 1 error, 0 warn, 0 info
@@ -119,9 +131,9 @@ old.md -> new.md:
 
 `tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
 gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **276/276 corpus vectors pass** (62 hand-authored `spec/` + 214
-generated `gen/`, 16 files), incl. every `seqmatch` vector (143, with non-BMP) to
-delta 0.
+identical key sets. **295/295 corpus vectors pass** (66 hand-authored `spec/` + 229
+generated `gen/`, 18 files), incl. every `seqmatch` vector (143, with non-BMP) to
+delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python.
 
 ```sh
 cargo test          # conformance corpus + unit tests

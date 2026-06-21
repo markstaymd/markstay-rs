@@ -58,7 +58,7 @@ pub struct Marker {
 }
 
 #[inline]
-fn is_ws_byte(b: u8) -> bool {
+pub(crate) fn is_ws_byte(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)
 }
 
@@ -72,8 +72,15 @@ fn is_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
+/// Byte form of [`is_id_char`]: a §6 id character `[A-Za-z0-9_-]`. Shared with
+/// the write path (id minting / marker serialization), which scans bytes.
+#[inline]
+pub(crate) fn is_id_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
 /// First index of `needle` in `haystack`, or `None`.
-fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
@@ -251,6 +258,71 @@ fn remove_matches(text: &str, open: &[u8], close: &[u8]) -> String {
         let end = m.start + m.raw.len();
         out.push_str(&text[last..m.start]);
         last = end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Rewrite markers in place, in document order, without disturbing surrounding
+/// text. Port of impl/js/src/markers.js `rewriteMarkers`. `transform(marker)`
+/// receives a [`Marker`] (`line` is 0 here; position is not tracked) and returns
+/// `Some(replacement)`, or `None` to leave the marker unchanged. The write
+/// helpers (restamp, repair_duplicates) build on this so marker edits reuse the
+/// one canonical grammar instead of re-deriving it.
+///
+/// The JS reference uses a single combined `HTML|MDX` regex, so matching is one
+/// left-to-right pass that consumes each match (a marker delimiter inside an
+/// already-matched marker is never a separate match). This reproduces that by
+/// merging the two per-syntax scans and only ever taking the next match at or
+/// after the previous match's end (HTML wins a start-position tie, which the
+/// distinct open delimiters make impossible in practice).
+pub fn rewrite_markers<F>(text: &str, mut transform: F) -> String
+where
+    F: FnMut(&Marker) -> Option<String>,
+{
+    let html = scan(text, b"<!--", b"-->");
+    let mdx = scan(text, b"{/*", b"*/}");
+    let mut hi = 0usize;
+    let mut mi = 0usize;
+    let mut cursor = 0usize;
+    let mut last = 0usize;
+    let mut out = String::with_capacity(text.len());
+    loop {
+        while hi < html.len() && html[hi].start < cursor {
+            hi += 1;
+        }
+        while mi < mdx.len() && mdx[mi].start < cursor {
+            mi += 1;
+        }
+        let use_html = match (html.get(hi).map(|m| m.start), mdx.get(mi).map(|m| m.start)) {
+            (None, None) => break,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(hs), Some(ms)) => hs <= ms,
+        };
+        let (chosen, syntax) = if use_html {
+            (&html[hi], Syntax::Html)
+        } else {
+            (&mdx[mi], Syntax::Mdx)
+        };
+        let start = chosen.start;
+        let end = start + chosen.raw.len();
+        let id = parse_id(&chosen.body);
+        let marker = Marker {
+            id: id.clone(),
+            hash: parse_hash(&chosen.body),
+            raw: chosen.raw.clone(),
+            syntax,
+            line: 0,
+            malformed: id.is_none(),
+        };
+        out.push_str(&text[last..start]);
+        match transform(&marker) {
+            Some(repl) => out.push_str(&repl),
+            None => out.push_str(&marker.raw),
+        }
+        last = end;
+        cursor = end;
     }
     out.push_str(&text[last..]);
     out

@@ -17,8 +17,9 @@ use serde_json::{json, Map, Value};
 
 use markstay::{
     best_match, body_hash, body_score, build_anchors, context_bonus, find_markers, lint_diff,
-    lint_document, matching_blocks, normalize_body, parse_document, quote_ratio, ratio, resolve,
-    sort_findings, Block, Finding, Marker, Selector,
+    lint_document, matching_blocks, mint_id, normalize_body, parse_document, quote_ratio, ratio,
+    repair_duplicates, resolve, restamp, sort_findings, stamp, Block, Finding, Marker,
+    RestampOptions, Selector, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
 };
 
 const TOL: f64 = 1e-9;
@@ -200,8 +201,93 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
             }
             (Value::Object(got), v["resolutions"].clone())
         }
+        "stamp" => verify_stamp(v),
+        "mint" => verify_mint(v),
         other => panic!("unknown category {:?}", other),
     }
+}
+
+/// Id-minting vectors (§6). A fixed byte array is the injected source, consumed
+/// in order across the rejection loop's `random(n)` draws, so the rejection
+/// sampling is exercised identically in all three impls (a forced-rejection
+/// vector is the proof the Rust port matches JS/Python byte-for-byte).
+fn verify_mint(v: &Value) -> (Value, Value) {
+    let length = v["length"].as_u64().expect("mint vector needs a length") as usize;
+    let alphabet = v["alphabet"].as_str().unwrap_or(DEFAULT_ALPHABET).to_string();
+    let bytes: Vec<u8> = v["bytes"]
+        .as_array()
+        .expect("mint vector needs a bytes array")
+        .iter()
+        .map(|x| x.as_u64().expect("byte is an integer") as u8)
+        .collect();
+    let mut cursor = 0usize;
+    let random = |n: usize| {
+        let out = bytes[cursor..cursor + n].to_vec();
+        cursor += n;
+        out
+    };
+    (json!(mint_id(length, &alphabet, random)), v["expected"].clone())
+}
+
+/// A deterministic id factory yielding `ids[0], ids[1], ...` (mirrors the JS
+/// `seqFactory`): the write helpers' collision-avoidance wraps this, so the mint
+/// path itself is never exercised by these vectors.
+fn seq_minter(ids: Vec<String>) -> impl FnMut() -> String {
+    let mut i = 0usize;
+    move || {
+        let s = ids[i].clone();
+        i += 1;
+        s
+    }
+}
+
+/// Write-path vectors (§3/§4/§6/§7/§8), dispatched by the per-vector `op`. The id
+/// sequence is injected so minting is deterministic; `expected` is the frozen
+/// oracle shared with the JS and Python runners.
+fn verify_stamp(v: &Value) -> (Value, Value) {
+    let input = str_field(v, "input");
+    let o = &v["options"];
+    let got = match str_field(v, "op") {
+        "stamp" => {
+            let opts = StampOptions {
+                syntax: match o["syntax"].as_str() {
+                    Some("mdx") => Syntax::Mdx,
+                    _ => Syntax::Html,
+                },
+                hash: o["hash"].as_bool().unwrap_or(true),
+                hash_length: o["hashLength"]
+                    .as_u64()
+                    .map(|n| n as usize)
+                    .unwrap_or(DEFAULT_HASH_LENGTH),
+            };
+            let r = stamp(input, &opts, seq_minter(strings(&v["ids"])));
+            let minted: Vec<Value> = r
+                .minted
+                .iter()
+                .map(|m| json!({ "id": m.id, "line": m.line }))
+                .collect();
+            json!({ "text": r.text, "minted": minted })
+        }
+        "restamp" => {
+            let opts = RestampOptions {
+                hash_length: o["hashLength"].as_u64().map(|n| n as usize),
+                add_missing: o["addMissing"].as_bool().unwrap_or(false),
+            };
+            let r = restamp(input, &opts);
+            json!({ "text": r.text, "refreshed": r.refreshed })
+        }
+        "repair" => {
+            let r = repair_duplicates(input, seq_minter(strings(&v["ids"])));
+            let renamed: Vec<Value> = r
+                .renamed
+                .iter()
+                .map(|x| json!({ "from": x.from, "to": x.to }))
+                .collect();
+            json!({ "text": r.text, "renamed": renamed })
+        }
+        other => panic!("unknown stamp op {:?}", other),
+    };
+    (got, v["expected"].clone())
 }
 
 fn verify_score(v: &Value) -> (Value, Value) {
@@ -252,9 +338,10 @@ fn verify_score(v: &Value) -> (Value, Value) {
 }
 
 fn corpus_dir() -> PathBuf {
-    // This is the published mirror: the corpus is vendored at ./conformance so
-    // `cargo test` runs standalone after `git clone` (the only mirror-only edit
-    // vs the umbrella's impl/rs, which reads the shared ../../conformance).
+    // The shared conformance corpus. In the umbrella crate (impl/rs) it is the
+    // tree two levels up; the published mirror vendors its own copy and the sync
+    // script rewrites the join target so `cargo test` runs standalone after a
+    // plain `git clone`.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("conformance")
         .canonicalize()

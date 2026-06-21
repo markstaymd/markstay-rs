@@ -273,3 +273,328 @@ fn quote_matcher_no_good_match_scores_below_threshold() {
     };
     assert!(best_match(&sel, &cands).score < 0.5);
 }
+
+// --- write path: ported from impl/js/test/stamp.test.js (SPEC.md §3/§4/§6/§7/§8)
+//
+// The strong invariants checked here are: stamping never changes block bodies,
+// the result lints clean, and every write op is idempotent.
+
+use markstay::{
+    find_markers, format_attr_value, format_marker, is_id_charset, mint_id, repair_duplicates,
+    restamp, stamp, FormatError, Renamed, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET,
+};
+
+/// Deterministic id factory `id00, id01, ...` for reproducible assertions.
+/// Collision-avoidance in the write helpers wraps this, so plain sequential ids
+/// are fine.
+fn counter(prefix: &'static str) -> impl FnMut() -> String {
+    let mut n = 0u32;
+    move || {
+        let s = format!("{}{:02}", prefix, n);
+        n += 1;
+        s
+    }
+}
+
+/// A factory yielding a fixed list of proposals in order (for collision tests).
+fn seq(ids: Vec<String>) -> impl FnMut() -> String {
+    let mut i = 0usize;
+    move || {
+        let s = ids[i].clone();
+        i += 1;
+        s
+    }
+}
+
+fn bodies(md: &str) -> Vec<String> {
+    parse_document(md)
+        .into_iter()
+        .filter(|b| b.index >= 0)
+        .map(|b| b.content)
+        .collect()
+}
+
+fn all_codes(md: &str) -> Vec<&'static str> {
+    let (_, findings) = lint_document(md);
+    findings.iter().map(|f| f.code).collect()
+}
+
+fn error_codes(md: &str) -> Vec<&'static str> {
+    let (_, findings) = lint_document(md);
+    findings
+        .iter()
+        .filter(|f| f.level.as_str() == "error")
+        .map(|f| f.code)
+        .collect()
+}
+
+const DOC: &str = "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n- a\n- b\n";
+
+// --- mint_id (§6) ---
+
+#[test]
+fn mint_id_default_ids_match_charset_and_length() {
+    let mut urandom = |k: usize| {
+        // A spread of bytes (including some >= the rejection limit) so the
+        // rejection loop is exercised across draws.
+        (0..k).map(|i| ((i as u32 * 37 + 5) % 256) as u8).collect::<Vec<u8>>()
+    };
+    for _ in 0..200 {
+        let id = mint_id(8, DEFAULT_ALPHABET, &mut urandom);
+        assert_eq!(id.chars().count(), 8);
+        assert!(is_id_charset(&id), "{} not in charset", id);
+    }
+}
+
+#[test]
+fn mint_id_injectable_byte_source_is_deterministic() {
+    let zeros = |k: usize| vec![0u8; k]; // every byte 0 -> alphabet[0] = 'A'
+    assert_eq!(mint_id(8, DEFAULT_ALPHABET, zeros), "AAAAAAAA");
+    assert_eq!(mint_id(3, DEFAULT_ALPHABET, zeros), "AAA");
+}
+
+#[test]
+#[should_panic]
+fn mint_id_rejects_zero_length() {
+    mint_id(0, DEFAULT_ALPHABET, |k| vec![0u8; k]);
+}
+
+#[test]
+#[should_panic]
+fn mint_id_rejects_degenerate_alphabet() {
+    mint_id(8, "x", |k| vec![0u8; k]);
+}
+
+// --- format_attr_value / format_marker (§3 / §4) ---
+
+#[test]
+fn format_attr_value_bare_vs_quoted_with_escaping() {
+    assert_eq!(format_attr_value("sha256:7a9c").unwrap(), "sha256:7a9c");
+    assert_eq!(format_attr_value("two words").unwrap(), "\"two words\"");
+    assert_eq!(format_attr_value("a\"b\\c").unwrap(), "\"a\\\"b\\\\c\"");
+}
+
+#[test]
+fn format_attr_value_rejects_outside_qchar_set() {
+    // §4 qchar is printable ASCII only; tab/control/non-ASCII have no form.
+    assert!(matches!(
+        format_attr_value("tab\there"),
+        Err(FormatError::NonQchar(_))
+    ));
+    assert!(matches!(
+        format_attr_value("café"),
+        Err(FormatError::NonQchar(_))
+    ));
+}
+
+#[test]
+fn format_marker_html_and_mdx_round_trip_through_find_markers() {
+    let html = format_marker("8f24", Some("7a9c"), &[], Syntax::Html).unwrap();
+    assert_eq!(html, "<!-- stay:8f24 hash=sha256:7a9c -->");
+    let mdx = format_marker("8f24", Some("7a9c"), &[], Syntax::Mdx).unwrap();
+    assert_eq!(mdx, "{/* stay:8f24 hash=sha256:7a9c */}");
+    for raw in [&html, &mdx] {
+        let mk = &find_markers(raw, 0)[0];
+        assert_eq!(mk.id.as_deref(), Some("8f24"));
+        assert_eq!(mk.hash.as_deref(), Some("7a9c"));
+        assert!(!mk.malformed);
+    }
+}
+
+#[test]
+fn format_marker_extension_attrs_and_uppercase_hash_folds_lower() {
+    let m = format_marker("x1", Some("ABCD"), &[("x-acme-note", "hi there")], Syntax::Html).unwrap();
+    assert_eq!(m, "<!-- stay:x1 hash=sha256:abcd x-acme-note=\"hi there\" -->");
+}
+
+#[test]
+fn format_marker_rejects_bad_id_non_hex_and_terminator_values() {
+    assert!(format_marker("bad id", None, &[], Syntax::Html).is_err());
+    assert!(format_marker("ok", Some("zz"), &[], Syntax::Html).is_err());
+    assert!(format_marker("ok", None, &[("x-k", "a-->b")], Syntax::Html).is_err());
+    assert!(format_marker("ok", None, &[("x-k", "a*/}b")], Syntax::Mdx).is_err());
+    // A value bearing a newline is rejected by the qchar guard inside the marker.
+    assert!(format_marker("x", None, &[("x-v", "line\nbreak")], Syntax::Html).is_err());
+}
+
+// --- stamp (§5 / §6 / §8) ---
+
+#[test]
+fn stamp_marks_every_unmarked_block_leaves_bodies_unchanged_lints_clean() {
+    let before = bodies(DOC);
+    let res = stamp(DOC, &StampOptions::default(), counter("id"));
+    assert_eq!(res.minted.len(), before.len()); // one id per content block
+    assert_eq!(bodies(&res.text), before); // bodies untouched
+    assert!(error_codes(&res.text).is_empty()); // clean
+    for b in parse_document(&res.text).iter().filter(|x| x.index >= 0) {
+        let ids = b.markers.iter().filter(|m| m.id.is_some() && !m.malformed).count();
+        assert_eq!(ids, 1);
+    }
+}
+
+#[test]
+fn stamp_canonical_trailing_shape_with_fresh_matching_hash() {
+    let res = stamp("Hello world.", &StampOptions::default(), || "abc12345".to_string());
+    let h = body_hash("Hello world.", Some(12));
+    assert_eq!(
+        res.text,
+        format!("Hello world.\n<!-- stay:abc12345 hash=sha256:{h} -->")
+    );
+}
+
+#[test]
+fn stamp_idempotent_and_leaves_already_marked_blocks_alone() {
+    let once = stamp(DOC, &StampOptions::default(), counter("a")).text;
+    let twice = stamp(&once, &StampOptions::default(), counter("b"));
+    assert_eq!(twice.minted.len(), 0);
+    assert_eq!(twice.text, once);
+}
+
+#[test]
+fn stamp_marker_only_chunk_after_a_block_already_identifies_it() {
+    let md = "Para body.\n\n<!-- stay:keep hash=sha256:0000 -->\n\nOther.";
+    let res = stamp(md, &StampOptions::default(), || "new0".to_string());
+    assert_eq!(res.minted.len(), 1); // only "Other." is unmarked
+    assert_eq!(res.minted[0].id, "new0");
+    assert!(res.text.contains("stay:keep"));
+}
+
+#[test]
+fn stamp_minted_ids_never_collide_with_existing_ids() {
+    let md = "A.\n<!-- stay:id00 -->\n\nB.";
+    // factory would re-propose id00; collision-avoidance must skip it
+    let res = stamp(
+        md,
+        &StampOptions::default(),
+        seq(vec!["id00".into(), "id00".into(), "id01".into()]),
+    );
+    assert_eq!(res.minted.len(), 1);
+    assert_eq!(res.minted[0].id, "id01");
+}
+
+#[test]
+fn stamp_mdx_syntax_and_no_hash() {
+    let opts = StampOptions {
+        syntax: Syntax::Mdx,
+        hash: false,
+        ..Default::default()
+    };
+    let res = stamp("Body.", &opts, || "m1".to_string());
+    assert_eq!(res.text, "Body.\n{/* stay:m1 */}");
+}
+
+#[test]
+fn stamp_hash_length_controls_written_precision() {
+    let opts = StampOptions {
+        hash_length: 4,
+        ..Default::default()
+    };
+    let res = stamp("Body.", &opts, || "h1".to_string());
+    let mk = &find_markers(&res.text, 0)[0];
+    let h = mk.hash.as_deref().unwrap();
+    assert_eq!(h.len(), 4);
+    assert_eq!(h, body_hash("Body.", Some(4)));
+}
+
+// --- restamp (§8) ---
+
+#[test]
+fn restamp_refreshes_a_drifted_hash_and_then_lints_clean() {
+    let stamped = stamp("Original body.", &StampOptions::default(), || "r1".to_string()).text;
+    let edited = stamped.replace("Original body.", "Edited body now.");
+    assert_eq!(all_codes(&edited), ["HASH_DRIFT"]);
+    let res = restamp(&edited, &RestampOptions::default());
+    assert_eq!(res.refreshed, ["r1"]);
+    assert!(all_codes(&res.text).is_empty());
+}
+
+#[test]
+fn restamp_no_op_when_nothing_drifted() {
+    let stamped = stamp(DOC, &StampOptions::default(), counter("id")).text;
+    let res = restamp(&stamped, &RestampOptions::default());
+    assert!(res.refreshed.is_empty());
+    assert_eq!(res.text, stamped);
+}
+
+#[test]
+fn restamp_preserves_each_markers_stored_hash_precision() {
+    // stored 4-char hash, content changed -> refreshed value is still 4 chars
+    let md = "New text here.\n<!-- stay:p1 hash=sha256:0000 -->";
+    let res = restamp(md, &RestampOptions::default());
+    let mk = &find_markers(&res.text, 0)[0];
+    let h = mk.hash.as_deref().unwrap();
+    assert_eq!(h.len(), 4);
+    assert_eq!(h, body_hash("New text here.", Some(4)));
+}
+
+#[test]
+fn restamp_add_missing_gives_a_hashless_marker_a_hash() {
+    let md = "Body text.\n<!-- stay:n1 -->";
+    let res = restamp(
+        md,
+        &RestampOptions {
+            add_missing: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(res.refreshed, ["n1"]);
+    let mk = &find_markers(&res.text, 0)[0];
+    assert_eq!(mk.hash.as_deref(), Some(body_hash("Body text.", Some(12)).as_str()));
+}
+
+// --- repair_duplicates (§7) ---
+
+#[test]
+fn repair_first_occurrence_kept_later_reminted_lints_clean() {
+    let md = "Para one.\n<!-- stay:dup hash=sha256:0000 -->\n\n\
+              Para two.\n<!-- stay:dup hash=sha256:1111 -->";
+    assert!(error_codes(md).contains(&"DUPLICATE_ID"));
+    let res = repair_duplicates(md, || "fresh1".to_string());
+    assert_eq!(
+        res.renamed,
+        vec![Renamed {
+            from: "dup".into(),
+            to: "fresh1".into()
+        }]
+    );
+    assert!(res.text.contains("stay:dup")); // first kept
+    assert!(res.text.contains("stay:fresh1")); // second re-minted
+    assert!(error_codes(&res.text).is_empty());
+}
+
+#[test]
+fn repair_two_same_id_markers_on_one_block() {
+    let md = "A.\n<!-- stay:dup -->\n<!-- stay:dup -->";
+    assert!(error_codes(md).contains(&"DUPLICATE_ID"));
+    let res = repair_duplicates(md, || "fresh1".to_string());
+    assert_eq!(
+        res.renamed,
+        vec![Renamed {
+            from: "dup".into(),
+            to: "fresh1".into()
+        }]
+    );
+    assert!(error_codes(&res.text).is_empty());
+}
+
+#[test]
+fn repair_no_op_when_there_are_no_duplicates() {
+    let md = stamp(DOC, &StampOptions::default(), counter("id")).text;
+    let res = repair_duplicates(&md, || "unused".to_string());
+    assert!(res.renamed.is_empty());
+    assert_eq!(res.text, md);
+}
+
+#[test]
+fn repair_reminted_id_never_collides_with_existing_id() {
+    let md = "One.\n<!-- stay:dup -->\n\nTwo.\n<!-- stay:dup -->\n\nThree.\n<!-- stay:taken -->";
+    // first proposal clashes with an existing id, must be skipped
+    let res = repair_duplicates(md, seq(vec!["taken".into(), "ok1".into()]));
+    assert_eq!(
+        res.renamed,
+        vec![Renamed {
+            from: "dup".into(),
+            to: "ok1".into()
+        }]
+    );
+}
