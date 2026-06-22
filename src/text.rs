@@ -7,7 +7,7 @@
 // used by hash/segment/parse/quote, mirrors the Python reference's
 // `rstrip(" \t\f\v")`, `strip(" \t\f\v")`, and the §9 `normalize` ASCII rules.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 /// ASCII whitespace *within a line* (no newlines): space, tab, form feed,
 /// vertical tab. Mirrors Python `rstrip(" \t\f\v")` / JS `[ \t\f\v]`.
@@ -68,11 +68,4 @@ pub fn ascii_collapse(s: &str) -> String {
 #[inline]
 pub fn ascii_lower(s: &str) -> String {
     s.to_ascii_lowercase()
-}
-
-/// Owned-string variant of [`ascii_trim`], for the public API surface that
-/// mirrors JS `asciiTrim` (which returns a string).
-#[inline]
-pub fn ascii_trim_owned(s: &str) -> String {
-    ascii_trim(s).to_string()
 }

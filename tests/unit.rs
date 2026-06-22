@@ -18,11 +18,7 @@ fn codes_sorted(findings: &[Finding]) -> Vec<&'static str> {
 }
 
 fn ids_for(findings: &[Finding], code: &str) -> Vec<String> {
-    findings
-        .iter()
-        .filter(|f| f.code == code)
-        .filter_map(|f| f.id.clone())
-        .collect()
+    findings.iter().filter(|f| f.code == code).filter_map(|f| f.id.clone()).collect()
 }
 
 // --- vendored SHA-256: FIPS-180 vectors (backs hash.json) -------------------
@@ -177,12 +173,7 @@ fn marker_tier_kept_markers_resolve_by_marker() {
     let after = "Invalid payloads route to a dead-letter queue for replay.\n\
          <!-- stay:dlq -->\n\n\
          The order pipeline ingests and normalizes partner messages.\n<!-- stay:ing -->\n";
-    let res = resolve(
-        &build_anchors(REORDER_BEFORE),
-        after,
-        DEFAULT_THRESHOLD,
-        DEFAULT_MARGIN,
-    );
+    let res = resolve(&build_anchors(REORDER_BEFORE), after, DEFAULT_THRESHOLD, DEFAULT_MARGIN);
     assert_eq!(find(&res, "ing").method, "marker");
     assert_eq!(find(&res, "dlq").method, "marker");
 }
@@ -191,12 +182,7 @@ fn marker_tier_kept_markers_resolve_by_marker() {
 fn hash_tier_stripped_reordered_verbatim_recovers_by_hash() {
     let after = "Invalid payloads route to a dead-letter queue for replay.\n\n\
          The order pipeline ingests and normalizes partner messages.\n";
-    let res = resolve(
-        &build_anchors(REORDER_BEFORE),
-        after,
-        DEFAULT_THRESHOLD,
-        DEFAULT_MARGIN,
-    );
+    let res = resolve(&build_anchors(REORDER_BEFORE), after, DEFAULT_THRESHOLD, DEFAULT_MARGIN);
     assert_eq!(find(&res, "ing").method, "hash");
     assert_eq!(find(&res, "dlq").method, "hash");
     assert_eq!(find(&res, "ing").target, Some(1));
@@ -252,10 +238,7 @@ fn quote_matcher_exact_quote_wins_with_score_one() {
         "a totally different sentence here".to_string(),
         "the quick brown fox leaps high".to_string(),
     ];
-    let sel = Selector {
-        quote: "the quick brown fox jumps".to_string(),
-        ..Default::default()
-    };
+    let sel = Selector { quote: "the quick brown fox jumps".to_string(), ..Default::default() };
     let bm = best_match(&sel, &cands);
     assert_eq!(bm.index, 0);
     assert_eq!(bm.score, 1.0);
@@ -263,14 +246,9 @@ fn quote_matcher_exact_quote_wins_with_score_one() {
 
 #[test]
 fn quote_matcher_no_good_match_scores_below_threshold() {
-    let cands = [
-        "the quick brown fox jumps".to_string(),
-        "a totally different sentence here".to_string(),
-    ];
-    let sel = Selector {
-        quote: "completely unrelated text xyz".to_string(),
-        ..Default::default()
-    };
+    let cands =
+        ["the quick brown fox jumps".to_string(), "a totally different sentence here".to_string()];
+    let sel = Selector { quote: "completely unrelated text xyz".to_string(), ..Default::default() };
     assert!(best_match(&sel, &cands).score < 0.5);
 }
 
@@ -307,11 +285,7 @@ fn seq(ids: Vec<String>) -> impl FnMut() -> String {
 }
 
 fn bodies(md: &str) -> Vec<String> {
-    parse_document(md)
-        .into_iter()
-        .filter(|b| b.index >= 0)
-        .map(|b| b.content)
-        .collect()
+    parse_document(md).into_iter().filter(|b| b.index >= 0).map(|b| b.content).collect()
 }
 
 fn all_codes(md: &str) -> Vec<&'static str> {
@@ -321,11 +295,7 @@ fn all_codes(md: &str) -> Vec<&'static str> {
 
 fn error_codes(md: &str) -> Vec<&'static str> {
     let (_, findings) = lint_document(md);
-    findings
-        .iter()
-        .filter(|f| f.level.as_str() == "error")
-        .map(|f| f.code)
-        .collect()
+    findings.iter().filter(|f| f.level.as_str() == "error").map(|f| f.code).collect()
 }
 
 const DOC: &str = "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n- a\n- b\n";
@@ -377,14 +347,8 @@ fn format_attr_value_bare_vs_quoted_with_escaping() {
 #[test]
 fn format_attr_value_rejects_outside_qchar_set() {
     // §4 qchar is printable ASCII only; tab/control/non-ASCII have no form.
-    assert!(matches!(
-        format_attr_value("tab\there"),
-        Err(FormatError::NonQchar(_))
-    ));
-    assert!(matches!(
-        format_attr_value("café"),
-        Err(FormatError::NonQchar(_))
-    ));
+    assert!(matches!(format_attr_value("tab\there"), Err(FormatError::NonQchar(_))));
+    assert!(matches!(format_attr_value("café"), Err(FormatError::NonQchar(_))));
 }
 
 #[test]
@@ -403,7 +367,8 @@ fn format_marker_html_and_mdx_round_trip_through_find_markers() {
 
 #[test]
 fn format_marker_extension_attrs_and_uppercase_hash_folds_lower() {
-    let m = format_marker("x1", Some("ABCD"), &[("x-acme-note", "hi there")], Syntax::Html).unwrap();
+    let m =
+        format_marker("x1", Some("ABCD"), &[("x-acme-note", "hi there")], Syntax::Html).unwrap();
     assert_eq!(m, "<!-- stay:x1 hash=sha256:abcd x-acme-note=\"hi there\" -->");
 }
 
@@ -436,10 +401,7 @@ fn stamp_marks_every_unmarked_block_leaves_bodies_unchanged_lints_clean() {
 fn stamp_canonical_trailing_shape_with_fresh_matching_hash() {
     let res = stamp("Hello world.", &StampOptions::default(), || "abc12345".to_string());
     let h = body_hash("Hello world.", Some(12));
-    assert_eq!(
-        res.text,
-        format!("Hello world.\n<!-- stay:abc12345 hash=sha256:{h} -->")
-    );
+    assert_eq!(res.text, format!("Hello world.\n<!-- stay:abc12345 hash=sha256:{h} -->"));
 }
 
 #[test]
@@ -463,32 +425,22 @@ fn stamp_marker_only_chunk_after_a_block_already_identifies_it() {
 fn stamp_minted_ids_never_collide_with_existing_ids() {
     let md = "A.\n<!-- stay:id00 -->\n\nB.";
     // factory would re-propose id00; collision-avoidance must skip it
-    let res = stamp(
-        md,
-        &StampOptions::default(),
-        seq(vec!["id00".into(), "id00".into(), "id01".into()]),
-    );
+    let res =
+        stamp(md, &StampOptions::default(), seq(vec!["id00".into(), "id00".into(), "id01".into()]));
     assert_eq!(res.minted.len(), 1);
     assert_eq!(res.minted[0].id, "id01");
 }
 
 #[test]
 fn stamp_mdx_syntax_and_no_hash() {
-    let opts = StampOptions {
-        syntax: Syntax::Mdx,
-        hash: false,
-        ..Default::default()
-    };
+    let opts = StampOptions { syntax: Syntax::Mdx, hash: false, ..Default::default() };
     let res = stamp("Body.", &opts, || "m1".to_string());
     assert_eq!(res.text, "Body.\n{/* stay:m1 */}");
 }
 
 #[test]
 fn stamp_hash_length_controls_written_precision() {
-    let opts = StampOptions {
-        hash_length: 4,
-        ..Default::default()
-    };
+    let opts = StampOptions { hash_length: 4, ..Default::default() };
     let res = stamp("Body.", &opts, || "h1".to_string());
     let mk = &find_markers(&res.text, 0)[0];
     let h = mk.hash.as_deref().unwrap();
@@ -530,13 +482,7 @@ fn restamp_preserves_each_markers_stored_hash_precision() {
 #[test]
 fn restamp_add_missing_gives_a_hashless_marker_a_hash() {
     let md = "Body text.\n<!-- stay:n1 -->";
-    let res = restamp(
-        md,
-        &RestampOptions {
-            add_missing: true,
-            ..Default::default()
-        },
-    );
+    let res = restamp(md, &RestampOptions { add_missing: true, ..Default::default() });
     assert_eq!(res.refreshed, ["n1"]);
     let mk = &find_markers(&res.text, 0)[0];
     assert_eq!(mk.hash.as_deref(), Some(body_hash("Body text.", Some(12)).as_str()));
@@ -550,13 +496,7 @@ fn repair_first_occurrence_kept_later_reminted_lints_clean() {
               Para two.\n<!-- stay:dup hash=sha256:1111 -->";
     assert!(error_codes(md).contains(&"DUPLICATE_ID"));
     let res = repair_duplicates(md, || "fresh1".to_string());
-    assert_eq!(
-        res.renamed,
-        vec![Renamed {
-            from: "dup".into(),
-            to: "fresh1".into()
-        }]
-    );
+    assert_eq!(res.renamed, vec![Renamed { from: "dup".into(), to: "fresh1".into() }]);
     assert!(res.text.contains("stay:dup")); // first kept
     assert!(res.text.contains("stay:fresh1")); // second re-minted
     assert!(error_codes(&res.text).is_empty());
@@ -567,13 +507,7 @@ fn repair_two_same_id_markers_on_one_block() {
     let md = "A.\n<!-- stay:dup -->\n<!-- stay:dup -->";
     assert!(error_codes(md).contains(&"DUPLICATE_ID"));
     let res = repair_duplicates(md, || "fresh1".to_string());
-    assert_eq!(
-        res.renamed,
-        vec![Renamed {
-            from: "dup".into(),
-            to: "fresh1".into()
-        }]
-    );
+    assert_eq!(res.renamed, vec![Renamed { from: "dup".into(), to: "fresh1".into() }]);
     assert!(error_codes(&res.text).is_empty());
 }
 
@@ -590,11 +524,5 @@ fn repair_reminted_id_never_collides_with_existing_id() {
     let md = "One.\n<!-- stay:dup -->\n\nTwo.\n<!-- stay:dup -->\n\nThree.\n<!-- stay:taken -->";
     // first proposal clashes with an existing id, must be skipped
     let res = repair_duplicates(md, seq(vec!["taken".into(), "ok1".into()]));
-    assert_eq!(
-        res.renamed,
-        vec![Renamed {
-            from: "dup".into(),
-            to: "ok1".into()
-        }]
-    );
+    assert_eq!(res.renamed, vec![Renamed { from: "dup".into(), to: "ok1".into() }]);
 }

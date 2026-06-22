@@ -62,8 +62,10 @@ pub(crate) fn is_ws_byte(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)
 }
 
+/// `\w` byte (`[A-Za-z0-9_]`): the predicate behind the `\b` word boundary that the
+/// read and write hash scanners both require before the `hash` attribute key.
 #[inline]
-fn is_word_byte(b: u8) -> bool {
+pub(crate) fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
@@ -138,11 +140,7 @@ fn scan(text: &str, open: &[u8], close: &[u8]) -> Vec<RawMatch> {
                 let q = search_from + crel;
                 let raw = text[open_pos..q + close.len()].to_string();
                 let body = rstrip_line_ws(&text[group_start..q]).to_string();
-                out.push(RawMatch {
-                    start: open_pos,
-                    raw,
-                    body,
-                });
+                out.push(RawMatch { start: open_pos, raw, body });
                 pos = q + close.len();
             }
         }
@@ -171,40 +169,85 @@ fn parse_id(body: &str) -> Option<String> {
     }
 }
 
-/// Parse the block hash from a marker body
-/// (`\bhash\s*=\s*sha256:([0-9a-fA-F]+)`), returned lowercase. First match wins.
-fn parse_hash(body: &str) -> Option<String> {
-    let bytes = body.as_bytes();
+/// Byte span `(stay_start, id_end)` of the first `stay:\s*<id>` token in `s`,
+/// the write-path counterpart to `parse_id`. Deliberately asymmetric with the
+/// read parser: it has no `^stay:` anchor and no `(?=\s|$)` lookahead, so in
+/// isolation it would accept an id `parse_id` rejects (a later `stay:`, or
+/// `stay:id=x`). That divergence is unreachable: restamp/repair only reach the
+/// marker-surgery helpers once `find_markers` has accepted a well-formed id, so
+/// the two grammars are kept separate rather than forced into one (a shared
+/// finder would rescue inputs the read path must reject). Used by stamp.rs
+/// (replace_stay_id / insert_hash_after_stay).
+pub(crate) fn find_stay_span(s: &str) -> Option<(usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while let Some(rel) = find_sub(&bytes[i..], b"stay:") {
+        let at = i + rel;
+        let mut j = at + 5;
+        while j < bytes.len() && is_ws_byte(bytes[j]) {
+            j += 1;
+        }
+        let id_start = j;
+        while j < bytes.len() && is_id_byte(bytes[j]) {
+            j += 1;
+        }
+        if j > id_start {
+            return Some((at, j));
+        }
+        i = at + 1;
+    }
+    None
+}
+
+/// Byte span of the first well-formed `\bhash\s*=\s*sha256:<hex>` run in `s`, as
+/// `(key_start, hex_start, hex_end)`: `key_start` is the `h` of `hash`, and
+/// `hex_start..hex_end` is the hex value as written (mixed case). `\b` is
+/// enforced (the byte before `hash` is non-word or the string start), so a
+/// `hash` embedded in a longer §4 key such as `rehash` is skipped. Canonical
+/// home of the HASH grammar: the read path (`parse_hash`) lowercases
+/// `hex_start..hex_end`; the write path (`replace_first_hash` in stamp.rs)
+/// splices over `key_start..hex_end`. Both enforce the same `\b`, so they share
+/// this with no boundary parameter.
+pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
+    let bytes = s.as_bytes();
     let mut from = 0usize;
     while let Some(rel) = find_sub(&bytes[from..], b"hash") {
         let at = from + rel;
-        // \b before `hash`: previous char must be non-word (or start of string).
-        let boundary = at == 0 || !is_word_byte(bytes[at - 1]);
-        if boundary {
-            let mut j = at + 4;
+        // \b before `hash`: previous byte must be non-word (or the string start).
+        if at != 0 && is_word_byte(bytes[at - 1]) {
+            from = at + 1;
+            continue;
+        }
+        let mut j = at + 4;
+        while j < bytes.len() && is_ws_byte(bytes[j]) {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'=' {
+            j += 1;
             while j < bytes.len() && is_ws_byte(bytes[j]) {
                 j += 1;
             }
-            if j < bytes.len() && bytes[j] == b'=' {
-                j += 1;
-                while j < bytes.len() && is_ws_byte(bytes[j]) {
-                    j += 1;
+            if bytes[j..].starts_with(b"sha256:") {
+                let hex_start = j + 7;
+                let mut k = hex_start;
+                while k < bytes.len() && bytes[k].is_ascii_hexdigit() {
+                    k += 1;
                 }
-                if bytes[j..].starts_with(b"sha256:") {
-                    let hexstart = j + 7;
-                    let mut k = hexstart;
-                    while k < bytes.len() && bytes[k].is_ascii_hexdigit() {
-                        k += 1;
-                    }
-                    if k > hexstart {
-                        return Some(body[hexstart..k].to_ascii_lowercase());
-                    }
+                if k > hex_start {
+                    return Some((at, hex_start, k));
                 }
             }
         }
         from = at + 1;
     }
     None
+}
+
+/// Parse the block hash from a marker body
+/// (`\bhash\s*=\s*sha256:([0-9a-fA-F]+)`), returned lowercase. First match wins.
+fn parse_hash(body: &str) -> Option<String> {
+    let (_, hex_start, hex_end) = find_hash_hex_span(body)?;
+    Some(body[hex_start..hex_end].to_ascii_lowercase())
 }
 
 /// All markstay markers in `text`, ordered by position. `line_offset` is the
@@ -229,14 +272,7 @@ pub fn find_markers(text: &str, line_offset: usize) -> Vec<Marker> {
         let id = parse_id(&body);
         let hash = parse_hash(&body);
         let malformed = id.is_none();
-        out.push(Marker {
-            id,
-            hash,
-            raw,
-            syntax: syn,
-            line,
-            malformed,
-        });
+        out.push(Marker { id, hash, raw, syntax: syn, line, malformed });
     }
     out
 }
@@ -300,11 +336,8 @@ where
             (None, Some(_)) => false,
             (Some(hs), Some(ms)) => hs <= ms,
         };
-        let (chosen, syntax) = if use_html {
-            (&html[hi], Syntax::Html)
-        } else {
-            (&mdx[mi], Syntax::Mdx)
-        };
+        let (chosen, syntax) =
+            if use_html { (&html[hi], Syntax::Html) } else { (&mdx[mi], Syntax::Mdx) };
         let start = chosen.start;
         let end = start + chosen.raw.len();
         let id = parse_id(&chosen.body);

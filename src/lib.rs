@@ -33,8 +33,8 @@ pub use hash::{body_hash, normalize_body};
 pub use text::ascii_trim;
 
 pub use markers::{find_markers, rewrite_markers, strip_markers, Marker, Syntax};
-pub use segment::segment_blank_line;
 pub use parse::{parse_document, Block};
+pub use segment::segment_blank_line;
 
 pub use id::{is_id_charset, mint_id, DEFAULT_ALPHABET, DEFAULT_ID_LENGTH};
 pub use stamp::{

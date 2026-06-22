@@ -1,0 +1,5 @@
+# The crate is written in a compact style: call/chain/struct exprs stay on one
+# line up to max_width rather than rustfmt's narrower default heuristics. Pinning
+# this keeps `cargo fmt --check` green and the diffs minimal across rustfmt
+# releases (whose default chain/call widths have drifted over versions).
+use_small_heuristics = "Max"

@@ -16,8 +16,7 @@ use alloc::vec::Vec;
 /// `[A-Za-z0-9_-]`. `_` and `-` are legal in authored ids but omitted from
 /// *generated* ids so a minted id never begins with `-` (which reads as a CLI
 /// flag) and never collides with the marker delimiters.
-pub const DEFAULT_ALPHABET: &str =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+pub const DEFAULT_ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /// 8 base62 chars ~= 47.6 bits: ample collision resistance for per-document
 /// coverage without the token weight of a UUID (§6 calls UUIDs too heavy).

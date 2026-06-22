@@ -86,11 +86,7 @@ pub fn body_score(sel: &Selector, candidate: &str) -> f64 {
     let mut base = quote_ratio(&q, &c);
     let lq = cp_len(&q);
     let lc = cp_len(&c);
-    let (short, long, ls, ll) = if lq <= lc {
-        (&q, &c, lq, lc)
-    } else {
-        (&c, &q, lc, lq)
-    };
+    let (short, long, ls, ll) = if lq <= lc { (&q, &c, lq, lc) } else { (&c, &q, lc, lq) };
     if !short.is_empty() && long.contains(short.as_str()) {
         let containment = ls as f64 / ll as f64;
         if containment > base {
@@ -124,25 +120,15 @@ pub fn best_match(sel: &Selector, candidates: &[String]) -> BestMatch {
     for i in 0..n {
         let s = body_score(sel, &candidates[i]);
         let prev = if i > 0 { candidates[i - 1].as_str() } else { "" };
-        let next = if i + 1 < n {
-            candidates[i + 1].as_str()
-        } else {
-            ""
-        };
+        let next = if i + 1 < n { candidates[i + 1].as_str() } else { "" };
         scored.push((s + context_bonus(sel, prev, next), i));
     }
     if scored.is_empty() {
-        return BestMatch {
-            index: -1,
-            score: 0.0,
-            runner_up: 0.0,
-        };
+        return BestMatch { index: -1, score: 0.0, runner_up: 0.0 };
     }
     // Sort (score, index) descending: an exact tie picks the later candidate.
     scored.sort_by(|x, y| {
-        y.0.partial_cmp(&x.0)
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then(y.1.cmp(&x.1))
+        y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal).then(y.1.cmp(&x.1))
     });
     let (best_score, best_index) = scored[0];
     let runner_up = if scored.len() > 1 { scored[1].0 } else { 0.0 };

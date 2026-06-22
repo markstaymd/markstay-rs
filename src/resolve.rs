@@ -39,10 +39,8 @@ pub struct Resolution {
 /// with a well-formed marker contributes one anchor carrying the block's full
 /// body hash and a quote selector built from the block and its neighbours.
 pub fn build_anchors(before_md: &str) -> Vec<Anchor> {
-    let blocks: Vec<Block> = parse_document(before_md)
-        .into_iter()
-        .filter(|b| b.index >= 0)
-        .collect();
+    let blocks: Vec<Block> =
+        parse_document(before_md).into_iter().filter(|b| b.index >= 0).collect();
     build_anchors_from_blocks(&blocks)
 }
 
@@ -52,21 +50,9 @@ pub fn build_anchors_from_blocks(blocks: &[Block]) -> Vec<Anchor> {
     let mut anchors: Vec<Anchor> = Vec::new();
     for i in 0..blocks.len() {
         let b = &blocks[i];
-        let prev = if i > 0 {
-            blocks[i - 1].content.clone()
-        } else {
-            String::new()
-        };
-        let next = if i + 1 < blocks.len() {
-            blocks[i + 1].content.clone()
-        } else {
-            String::new()
-        };
-        let selector = Selector {
-            quote: b.content.clone(),
-            prefix: prev,
-            suffix: next,
-        };
+        let prev = if i > 0 { blocks[i - 1].content.clone() } else { String::new() };
+        let next = if i + 1 < blocks.len() { blocks[i + 1].content.clone() } else { String::new() };
+        let selector = Selector { quote: b.content.clone(), prefix: prev, suffix: next };
         for mk in &b.markers {
             if mk.malformed {
                 continue;
@@ -87,10 +73,8 @@ pub fn build_anchors_from_blocks(blocks: &[Block]) -> Vec<Anchor> {
 /// Returns resolutions in anchor order; `target` is the after-doc content-block
 /// index or `None`.
 pub fn resolve(anchors: &[Anchor], after_md: &str, threshold: f64, margin: f64) -> Vec<Resolution> {
-    let after_blocks: Vec<Block> = parse_document(after_md)
-        .into_iter()
-        .filter(|b| b.index >= 0)
-        .collect();
+    let after_blocks: Vec<Block> =
+        parse_document(after_md).into_iter().filter(|b| b.index >= 0).collect();
     resolve_over_blocks(anchors, &after_blocks, threshold, margin)
 }
 

@@ -18,8 +18,8 @@ use std::fs;
 use std::process::ExitCode;
 
 use markstay::{
-    has_errors, lint_diff, lint_document, mint_id, repair_duplicates, restamp, sort_findings, stamp,
-    Finding, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
+    has_errors, lint_diff, lint_document, mint_id, repair_duplicates, restamp, sort_findings,
+    stamp, Finding, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
     DEFAULT_ID_LENGTH,
 };
 
@@ -135,13 +135,7 @@ fn render_text(label: &str, findings: &[Finding]) -> String {
             Some(n) => format!("L{}", n),
             None => "-".to_string(),
         };
-        out.push(format!(
-            "  [{:5}] {:16} {:>5}  {}",
-            f.level.as_str(),
-            f.code,
-            where_,
-            f.message
-        ));
+        out.push(format!("  [{:5}] {:16} {:>5}  {}", f.level.as_str(), f.code, where_, f.message));
     }
     let n_err = findings.iter().filter(|f| f.level.as_str() == "error").count();
     let n_warn = findings.iter().filter(|f| f.level.as_str() == "warn").count();
@@ -189,7 +183,9 @@ fn cmd_lint(args: &[String]) -> ExitCode {
                 println!("{}", usage());
                 return ExitCode::SUCCESS;
             }
-            other if other.starts_with('-') => return arg_err(&format!("unknown option {}", other)),
+            other if other.starts_with('-') => {
+                return arg_err(&format!("unknown option {}", other))
+            }
             other => files.push(other.to_string()),
         }
         i += 1;
@@ -236,10 +232,8 @@ fn cmd_lint(args: &[String]) -> ExitCode {
         }
         println!("{{\n{}\n}}", blocks.join(",\n"));
     } else {
-        let rendered: Vec<String> = results
-            .iter()
-            .map(|(label, fs)| render_text(label, fs))
-            .collect();
+        let rendered: Vec<String> =
+            results.iter().map(|(label, fs)| render_text(label, fs)).collect();
         println!("{}", rendered.join("\n"));
     }
 
@@ -286,34 +280,87 @@ fn run_write(
     ExitCode::SUCCESS
 }
 
+/// Consume a `--hash-length N` value into `slot` (shared by `stamp`/`restamp`).
+/// Advances `*i` past the value and keeps the original inline block's arg-error
+/// contract: `Err` carries the exit code `arg_err` returned.
+fn take_hash_length(
+    i: &mut usize,
+    args: &[String],
+    slot: &mut Option<usize>,
+) -> Result<bool, ExitCode> {
+    *i += 1;
+    match args.get(*i).map(|s| parse_positive(s)) {
+        Some(Ok(n)) => {
+            *slot = Some(n);
+            Ok(true)
+        }
+        _ => Err(arg_err("--hash-length needs a positive integer")),
+    }
+}
+
+struct CommonArgs {
+    write: bool,
+    files: Vec<String>,
+    help: bool,
+}
+
+/// Parse the flags shared by every write verb (`-w`/`--write`, `-h`/`--help`,
+/// the unknown-option error, and bare file arguments). Each token is offered to
+/// `extra` first: it returns `Ok(true)` if it claimed the token (advancing `*i`
+/// itself for a flag that takes a value), `Ok(false)` to defer to the common
+/// handling, or `Err(code)` to abort. On `-h`/`--help` usage is printed and
+/// `help` is set so the caller exits 0 before doing any work. Keeps the
+/// JS/Python CLI's exit codes and `usage`/error strings byte-identical.
+fn parse_write_args(
+    args: &[String],
+    mut extra: impl FnMut(&str, &mut usize, &[String]) -> Result<bool, ExitCode>,
+) -> Result<CommonArgs, ExitCode> {
+    let mut out = CommonArgs { write: false, files: Vec::new(), help: false };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if extra(arg, &mut i, args)? {
+            i += 1;
+            continue;
+        }
+        match arg {
+            "-w" | "--write" => out.write = true,
+            "-h" | "--help" => {
+                println!("{}", usage());
+                out.help = true;
+                return Ok(out);
+            }
+            other if other.starts_with('-') => {
+                return Err(arg_err(&format!("unknown option {}", other)));
+            }
+            other => out.files.push(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 fn cmd_stamp(args: &[String]) -> ExitCode {
-    let mut write = false;
     let mut mdx = false;
     let mut no_hash = false;
     let mut hash_length: Option<usize> = None;
-    let mut files: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-w" | "--write" => write = true,
-            "--mdx" => mdx = true,
-            "--no-hash" => no_hash = true,
-            "--hash-length" => {
-                i += 1;
-                match args.get(i).map(|s| parse_positive(s)) {
-                    Some(Ok(n)) => hash_length = Some(n),
-                    _ => return arg_err("--hash-length needs a positive integer"),
-                }
-            }
-            "-h" | "--help" => {
-                println!("{}", usage());
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => return arg_err(&format!("unknown option {}", other)),
-            other => files.push(other.to_string()),
+    let common = match parse_write_args(args, |flag, i, args| match flag {
+        "--mdx" => {
+            mdx = true;
+            Ok(true)
         }
-        i += 1;
+        "--no-hash" => {
+            no_hash = true;
+            Ok(true)
+        }
+        "--hash-length" => take_hash_length(i, args, &mut hash_length),
+        _ => Ok(false),
+    }) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    if common.help {
+        return ExitCode::SUCCESS;
     }
 
     if let Err(code) = rng_preflight() {
@@ -324,7 +371,7 @@ fn cmd_stamp(args: &[String]) -> ExitCode {
         hash: !no_hash,
         hash_length: hash_length.unwrap_or(DEFAULT_HASH_LENGTH),
     };
-    run_write("stamp", &files, write, |md| {
+    run_write("stamp", &common.files, common.write, |md| {
         let res = stamp(md, &opts, || {
             mint_id(DEFAULT_ID_LENGTH, DEFAULT_ALPHABET, |n| {
                 os_random(n).expect("system RNG verified by rng_preflight")
@@ -335,74 +382,49 @@ fn cmd_stamp(args: &[String]) -> ExitCode {
 }
 
 fn cmd_restamp(args: &[String]) -> ExitCode {
-    let mut write = false;
     let mut add_missing = false;
     let mut hash_length: Option<usize> = None;
-    let mut files: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-w" | "--write" => write = true,
-            "--add-missing" => add_missing = true,
-            "--hash-length" => {
-                i += 1;
-                match args.get(i).map(|s| parse_positive(s)) {
-                    Some(Ok(n)) => hash_length = Some(n),
-                    _ => return arg_err("--hash-length needs a positive integer"),
-                }
-            }
-            "-h" | "--help" => {
-                println!("{}", usage());
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => return arg_err(&format!("unknown option {}", other)),
-            other => files.push(other.to_string()),
+    let common = match parse_write_args(args, |flag, i, args| match flag {
+        "--add-missing" => {
+            add_missing = true;
+            Ok(true)
         }
-        i += 1;
+        "--hash-length" => take_hash_length(i, args, &mut hash_length),
+        _ => Ok(false),
+    }) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    if common.help {
+        return ExitCode::SUCCESS;
     }
 
-    let opts = RestampOptions {
-        hash_length,
-        add_missing,
-    };
-    run_write("restamp", &files, write, |md| {
+    let opts = RestampOptions { hash_length, add_missing };
+    run_write("restamp", &common.files, common.write, |md| {
         let res = restamp(md, &opts);
         (res.text, format!("{} hash(es) refreshed", res.refreshed.len()))
     })
 }
 
 fn cmd_repair(args: &[String]) -> ExitCode {
-    let mut write = false;
-    let mut files: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-w" | "--write" => write = true,
-            "-h" | "--help" => {
-                println!("{}", usage());
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => return arg_err(&format!("unknown option {}", other)),
-            other => files.push(other.to_string()),
-        }
-        i += 1;
+    let common = match parse_write_args(args, |_flag, _i, _args| Ok(false)) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    if common.help {
+        return ExitCode::SUCCESS;
     }
 
     if let Err(code) = rng_preflight() {
         return code;
     }
-    run_write("repair", &files, write, |md| {
+    run_write("repair", &common.files, common.write, |md| {
         let res = repair_duplicates(md, || {
             mint_id(DEFAULT_ID_LENGTH, DEFAULT_ALPHABET, |n| {
                 os_random(n).expect("system RNG verified by rng_preflight")
             })
         });
-        (
-            res.text,
-            format!("{} duplicate id(s) re-minted", res.renamed.len()),
-        )
+        (res.text, format!("{} duplicate id(s) re-minted", res.renamed.len()))
     })
 }
 

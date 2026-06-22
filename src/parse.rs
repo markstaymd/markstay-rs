@@ -46,20 +46,10 @@ pub fn parse_document(md: &str) -> Vec<Block> {
             if attach {
                 blocks.last_mut().unwrap().markers.extend(markers);
             } else {
-                blocks.push(Block {
-                    content: String::new(),
-                    markers,
-                    line: start,
-                    index: -1,
-                });
+                blocks.push(Block { content: String::new(), markers, line: start, index: -1 });
             }
         } else {
-            blocks.push(Block {
-                content,
-                markers,
-                line: start,
-                index: cidx,
-            });
+            blocks.push(Block { content, markers, line: start, index: cidx });
             cidx += 1;
         }
     }

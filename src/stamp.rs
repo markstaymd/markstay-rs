@@ -18,7 +18,8 @@ use alloc::vec::Vec;
 use crate::hash::{body_hash, normalize_newlines};
 use crate::id::is_id_charset;
 use crate::markers::{
-    find_markers, find_sub, is_id_byte, is_ws_byte, rewrite_markers, strip_markers, Marker, Syntax,
+    find_hash_hex_span, find_markers, find_stay_span, is_id_byte, rewrite_markers, strip_markers,
+    Marker, Syntax,
 };
 use crate::parse::parse_document;
 use crate::segment::segment_blank_line;
@@ -96,11 +97,7 @@ pub struct StampOptions {
 
 impl Default for StampOptions {
     fn default() -> Self {
-        StampOptions {
-            syntax: Syntax::Html,
-            hash: true,
-            hash_length: DEFAULT_HASH_LENGTH,
-        }
+        StampOptions { syntax: Syntax::Html, hash: true, hash_length: DEFAULT_HASH_LENGTH }
     }
 }
 
@@ -253,16 +250,13 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     let mut current: Option<usize> = None;
     for (start, chunk) in segment_blank_line(&norm) {
         let content = ascii_trim(&strip_markers(&chunk)).to_string();
-        let has_id = find_markers(&chunk, 0)
-            .iter()
-            .any(|mk| mk.id.is_some() && !mk.malformed);
+        let has_id = find_markers(&chunk, 0).iter().any(|mk| mk.id.is_some() && !mk.malformed);
         if !content.is_empty() {
             let n_lines = chunk.split('\n').count();
-            needs_stamp.push(PendingBlock {
-                last_line0: start + n_lines - 2,
-                content,
-                has_id,
-            });
+            // `start` is the chunk's 1-based first line (segment_blank_line), and the
+            // chunk holds only its non-blank lines, so its 0-based last line is
+            // (start - 1) + (n_lines - 1) = start + n_lines - 2.
+            needs_stamp.push(PendingBlock { last_line0: start + n_lines - 2, content, has_id });
             current = Some(needs_stamp.len() - 1);
         } else if let Some(idx) = current {
             // marker-only chunk: its id (if any) identifies the preceding block
@@ -279,25 +273,16 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
             continue;
         }
         let id = mint_unique(&mut used, &mut new_id);
-        let hex = if opts.hash {
-            Some(body_hash(&blk.content, Some(opts.hash_length)))
-        } else {
-            None
-        };
+        let hex =
+            if opts.hash { Some(body_hash(&blk.content, Some(opts.hash_length))) } else { None };
         let marker = format_marker(&id, hex.as_deref(), &[], opts.syntax)
             .expect("format_marker: a minted id and computed hash are well-formed");
         insert_after.insert(blk.last_line0, marker);
-        minted.push(Minted {
-            id,
-            line: blk.last_line0 + 1,
-        });
+        minted.push(Minted { id, line: blk.last_line0 + 1 });
     }
 
     if insert_after.is_empty() {
-        return StampResult {
-            text: norm,
-            minted: Vec::new(),
-        };
+        return StampResult { text: norm, minted: Vec::new() };
     }
 
     let mut out = String::with_capacity(norm.len());
@@ -336,9 +321,7 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
                 continue;
             }
             if let Some(id) = &mk.id {
-                content_by_id
-                    .entry(id.clone())
-                    .or_insert_with(|| b.content.clone());
+                content_by_id.entry(id.clone()).or_insert_with(|| b.content.clone());
             }
         }
     }
@@ -395,16 +378,10 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
     // A duplicate is any id on more than one marker, so two markers sharing an id
     // on the *same* block (which lint_document also flags) are repaired, not just
     // the copy-across-blocks case.
-    let dup: BTreeSet<String> = count
-        .into_iter()
-        .filter(|(_, c)| *c > 1)
-        .map(|(id, _)| id)
-        .collect();
+    let dup: BTreeSet<String> =
+        count.into_iter().filter(|(_, c)| *c > 1).map(|(id, _)| id).collect();
     if dup.is_empty() {
-        return RepairResult {
-            text: norm,
-            renamed: Vec::new(),
-        };
+        return RepairResult { text: norm, renamed: Vec::new() };
     }
 
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
@@ -420,10 +397,7 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
             return None; // first occurrence keeps the id
         }
         let fresh = mint_unique(&mut used, &mut new_id);
-        renamed.push(Renamed {
-            from: id.clone(),
-            to: fresh.clone(),
-        });
+        renamed.push(Renamed { from: id.clone(), to: fresh.clone() });
         Some(replace_stay_id(&mk.raw, &fresh))
     });
     RepairResult { text, renamed }
@@ -435,63 +409,22 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
 // helpers run over a marker's raw text. The Rust core has no regex, so each walks
 // the bytes using the shared scanner primitives from markers.rs.
 
-/// Byte span `(stay_start, id_end)` of the first `stay:\s*<id>` token in `raw`.
-fn find_stay_span(raw: &str) -> Option<(usize, usize)> {
-    let bytes = raw.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = find_sub(&bytes[i..], b"stay:") {
-        let at = i + rel;
-        let mut j = at + 5;
-        while j < bytes.len() && is_ws_byte(bytes[j]) {
-            j += 1;
-        }
-        let id_start = j;
-        while j < bytes.len() && is_id_byte(bytes[j]) {
-            j += 1;
-        }
-        if j > id_start {
-            return Some((at, j));
-        }
-        i = at + 1;
-    }
-    None
-}
-
-/// Replace the first `hash\s*=\s*sha256:<hex>` run in `raw` with
-/// `hash=sha256:{now}` (mirrors `re.sub(..., count=1)`).
+/// Replace the first `\bhash\s*=\s*sha256:<hex>` run in `raw` with
+/// `hash=sha256:{now}` (mirrors `re.sub(..., count=1)`). The `\b` skip of a
+/// `hash` inside a longer §4 key (e.g. `rehash`) lives in the shared
+/// `find_hash_hex_span`, so this and the read path cannot drift.
 fn replace_first_hash(raw: &str, now: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = find_sub(&bytes[i..], b"hash") {
-        let at = i + rel;
-        let mut j = at + 4;
-        while j < bytes.len() && is_ws_byte(bytes[j]) {
-            j += 1;
+    match find_hash_hex_span(raw) {
+        Some((key_start, _, hex_end)) => {
+            let mut out = String::with_capacity(raw.len() + now.len());
+            out.push_str(&raw[..key_start]);
+            out.push_str("hash=sha256:");
+            out.push_str(now);
+            out.push_str(&raw[hex_end..]);
+            out
         }
-        if j < bytes.len() && bytes[j] == b'=' {
-            j += 1;
-            while j < bytes.len() && is_ws_byte(bytes[j]) {
-                j += 1;
-            }
-            if bytes[j..].starts_with(b"sha256:") {
-                let hexstart = j + 7;
-                let mut k = hexstart;
-                while k < bytes.len() && bytes[k].is_ascii_hexdigit() {
-                    k += 1;
-                }
-                if k > hexstart {
-                    let mut out = String::with_capacity(raw.len() + now.len());
-                    out.push_str(&raw[..at]);
-                    out.push_str("hash=sha256:");
-                    out.push_str(now);
-                    out.push_str(&raw[k..]);
-                    return out;
-                }
-            }
-        }
-        i = at + 1;
+        None => raw.to_string(),
     }
-    raw.to_string()
 }
 
 /// Insert ` hash=sha256:{now}` immediately after the first `stay:<id>` token.

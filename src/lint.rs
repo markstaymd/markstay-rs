@@ -55,13 +55,7 @@ fn finding(
     id: Option<String>,
     line: Option<usize>,
 ) -> Finding {
-    Finding {
-        level,
-        code,
-        message,
-        id,
-        line,
-    }
+    Finding { level, code, message, id, line }
 }
 
 /// Well-formedness and intra-document invariants over a pre-segmented block list
@@ -101,10 +95,7 @@ pub fn lint_blocks(blocks: &[Block]) -> Vec<Finding> {
                 findings.push(finding(
                     Level::Error,
                     "DUPLICATE_ID",
-                    format!(
-                        "id {} appears more than once (first at line {})",
-                        id, first
-                    ),
+                    format!("id {} appears more than once (first at line {})", id, first),
                     Some(id.clone()),
                     Some(mk.line),
                 ));
@@ -178,11 +169,8 @@ pub fn lint_diff(before_md: &str, after_md: &str) -> Vec<Finding> {
 pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<Finding> {
     let before_idx = id_index(before_blocks);
     // before: ids with exactly one block, in first-seen order.
-    let before: Vec<(String, &Block)> = before_idx
-        .iter()
-        .filter(|(_, v)| v.len() == 1)
-        .map(|(k, v)| (k.clone(), v[0]))
-        .collect();
+    let before: Vec<(String, &Block)> =
+        before_idx.iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k.clone(), v[0])).collect();
     let after = id_index(after_blocks);
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -196,10 +184,7 @@ pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<
             findings.push(finding(
                 Level::Error,
                 "DROPPED_ID",
-                format!(
-                    "id {} was in the baseline but is gone after the edit (silent loss)",
-                    mid
-                ),
+                format!("id {} was in the baseline but is gone after the edit (silent loss)", mid),
                 Some(mid.clone()),
                 None,
             ));
@@ -262,10 +247,7 @@ pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<
         if ah == body_hash(&b0.content, None) {
             continue; // unchanged
         }
-        let moved_from = before_by_content
-            .iter()
-            .find(|(h, _)| *h == ah)
-            .map(|(_, id)| id.clone());
+        let moved_from = before_by_content.iter().find(|(h, _)| *h == ah).map(|(_, id)| id.clone());
         match moved_from {
             Some(src) if src != *mid => {
                 findings.push(finding(

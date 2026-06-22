@@ -44,9 +44,7 @@ fn approx(a: &Value, b: &Value) -> bool {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| approx(p, q))
         }
         (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len()
-                && x.keys()
-                    .all(|k| y.contains_key(k) && approx(&x[k], &y[k]))
+            x.len() == y.len() && x.keys().all(|k| y.contains_key(k) && approx(&x[k], &y[k]))
         }
         _ => a == b,
     }
@@ -92,17 +90,11 @@ fn finding_value(f: &Finding, with_line: bool) -> Value {
 }
 
 fn mb_value(blocks: &[(usize, usize, usize)]) -> Value {
-    Value::Array(
-        blocks
-            .iter()
-            .map(|t| json!([t.0, t.1, t.2]))
-            .collect(),
-    )
+    Value::Array(blocks.iter().map(|t| json!([t.0, t.1, t.2])).collect())
 }
 
 fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
-    v[k].as_str()
-        .unwrap_or_else(|| panic!("vector field {:?} is not a string: {}", k, v))
+    v[k].as_str().unwrap_or_else(|| panic!("vector field {:?} is not a string: {}", k, v))
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -138,39 +130,26 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
         }
         "markers" => {
             let got = Value::Array(
-                find_markers(str_field(v, "text"), 0)
-                    .iter()
-                    .map(marker_value)
-                    .collect(),
+                find_markers(str_field(v, "text"), 0).iter().map(marker_value).collect(),
             );
             (got, v["markers"].clone())
         }
         "parse" => {
-            let got = Value::Array(
-                parse_document(str_field(v, "doc"))
-                    .iter()
-                    .map(block_value)
-                    .collect(),
-            );
+            let got =
+                Value::Array(parse_document(str_field(v, "doc")).iter().map(block_value).collect());
             (got, v["blocks"].clone())
         }
         "lint" => {
             let (_, findings) = lint_document(str_field(v, "doc"));
             let got = Value::Array(
-                sort_findings(&findings)
-                    .iter()
-                    .map(|f| finding_value(f, true))
-                    .collect(),
+                sort_findings(&findings).iter().map(|f| finding_value(f, true)).collect(),
             );
             (got, v["findings"].clone())
         }
         "diff" => {
             let findings = lint_diff(str_field(v, "before"), str_field(v, "after"));
             let got = Value::Array(
-                sort_findings(&findings)
-                    .iter()
-                    .map(|f| finding_value(f, false))
-                    .collect(),
+                sort_findings(&findings).iter().map(|f| finding_value(f, false)).collect(),
             );
             (got, v["findings"].clone())
         }
@@ -261,11 +240,8 @@ fn verify_stamp(v: &Value) -> (Value, Value) {
                     .unwrap_or(DEFAULT_HASH_LENGTH),
             };
             let r = stamp(input, &opts, seq_minter(strings(&v["ids"])));
-            let minted: Vec<Value> = r
-                .minted
-                .iter()
-                .map(|m| json!({ "id": m.id, "line": m.line }))
-                .collect();
+            let minted: Vec<Value> =
+                r.minted.iter().map(|m| json!({ "id": m.id, "line": m.line })).collect();
             json!({ "text": r.text, "minted": minted })
         }
         "restamp" => {
@@ -278,11 +254,8 @@ fn verify_stamp(v: &Value) -> (Value, Value) {
         }
         "repair" => {
             let r = repair_duplicates(input, seq_minter(strings(&v["ids"])));
-            let renamed: Vec<Value> = r
-                .renamed
-                .iter()
-                .map(|x| json!({ "from": x.from, "to": x.to }))
-                .collect();
+            let renamed: Vec<Value> =
+                r.renamed.iter().map(|x| json!({ "from": x.from, "to": x.to })).collect();
             json!({ "text": r.text, "renamed": renamed })
         }
         other => panic!("unknown stamp op {:?}", other),
@@ -292,19 +265,10 @@ fn verify_stamp(v: &Value) -> (Value, Value) {
 
 fn verify_score(v: &Value) -> (Value, Value) {
     match str_field(v, "fn") {
-        "ratio" => (
-            json!(quote_ratio(str_field(v, "a"), str_field(v, "b"))),
-            v["score"].clone(),
-        ),
+        "ratio" => (json!(quote_ratio(str_field(v, "a"), str_field(v, "b"))), v["score"].clone()),
         "body_score" => {
-            let sel = Selector {
-                quote: str_field(v, "quote").to_string(),
-                ..Default::default()
-            };
-            (
-                json!(body_score(&sel, str_field(v, "candidate"))),
-                v["score"].clone(),
-            )
+            let sel = Selector { quote: str_field(v, "quote").to_string(), ..Default::default() };
+            (json!(body_score(&sel, str_field(v, "candidate"))), v["score"].clone())
         }
         "context_bonus" => {
             let sel = Selector {
@@ -369,17 +333,15 @@ fn corpus_files() -> Vec<(String, PathBuf)> {
 #[test]
 fn corpus() {
     let files = corpus_files();
-    assert!(
-        !files.is_empty(),
-        "no corpus files found under conformance/spec or conformance/gen"
-    );
+    assert!(!files.is_empty(), "no corpus files found under conformance/spec or conformance/gen");
 
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
     for (tier, path) in &files {
-        let data: Value = serde_json::from_str(&fs::read_to_string(path).expect("read corpus file"))
-            .expect("parse corpus json");
+        let data: Value =
+            serde_json::from_str(&fs::read_to_string(path).expect("read corpus file"))
+                .expect("parse corpus json");
         let category = data["category"].as_str().expect("category string");
         for v in data["vectors"].as_array().expect("vectors array") {
             total += 1;
@@ -395,12 +357,7 @@ fn corpus() {
     }
 
     let passed = total - failures.len();
-    println!(
-        "\n{}/{} corpus vectors pass ({} files)",
-        passed,
-        total,
-        files.len()
-    );
+    println!("\n{}/{} corpus vectors pass ({} files)", passed, total, files.len());
     assert!(
         failures.is_empty(),
         "{} of {} vectors failed:\n{}",

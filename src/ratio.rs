@@ -58,11 +58,7 @@ fn find_longest_match(
                     break;
                 }
                 // k = j2len[j-1] + 1 (j2len.get on j-1; j==0 -> wrap -> absent -> 0)
-                let prev = if j == 0 {
-                    0
-                } else {
-                    j2len.get(&(j - 1)).copied().unwrap_or(0)
-                };
+                let prev = if j == 0 { 0 } else { j2len.get(&(j - 1)).copied().unwrap_or(0) };
                 let k = prev + 1;
                 newj2len.insert(j, k);
                 if k > bestsize {
