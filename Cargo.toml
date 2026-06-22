@@ -1,6 +1,6 @@
 [package]
 name = "markstay"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description ="Reference Rust implementation of the markstay spec (v1.1, parser-free core): a source-level identity primitive for Markdown blocks. Zero runtime dependencies, no_std + alloc."
 authors = ["markstaymd <markstaymd@users.noreply.github.com>"]
