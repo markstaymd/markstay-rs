@@ -28,7 +28,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -43,7 +43,7 @@ jobs:
       id-token: write   # required for OIDC trusted publishing
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Authenticate with crates.io
         id: auth
