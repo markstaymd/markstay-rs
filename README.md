@@ -120,6 +120,14 @@ markstay repair  FILE... [-w]         # mint fresh ids for duplicate ids (§7)
 print the result to stdout by default; `-w`/`--write` edits files in place
 (required for more than one file).
 
+`HASH_DRIFT` (a block edited in place) never blocks and is the dominant line in a
+normal edit, so the text render **hides it by default** and collapses it to one
+receipt (`-> N hash-drift findings hidden (--show-drift to list)`); pass
+`--show-drift` to enumerate it. This is presentation only: the finding stays at
+`warn` in the `lint_document` / `lint_diff` return values and in `--json` (which is
+byte-identical with and without `--show-drift`), so caches and re-embed triggers
+that treat a stale hash as fatal read those, unaffected.
+
 ```sh
 $ markstay lint --before old.md new.md
 old.md -> new.md:

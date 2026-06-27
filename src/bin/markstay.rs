@@ -33,8 +33,8 @@ fn usage() -> &'static str {
      \x20 restamp  FILE... [-w]            refresh drifted hashes\n\
      \x20 repair   FILE... [-w]            mint fresh ids for duplicate ids\n\
      \n\
-     common options: --json (lint), -w/--write, --mdx, --no-hash,\n\
-     \x20               --hash-length N (stamp/restamp), --add-missing (restamp)"
+     common options: --json (lint), --show-drift (lint), -w/--write, --mdx,\n\
+     \x20               --no-hash, --hash-length N (stamp/restamp), --add-missing (restamp)"
 }
 
 fn arg_err(msg: &str) -> ExitCode {
@@ -125,17 +125,34 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-fn render_text(label: &str, findings: &[Finding]) -> String {
+// Human render. HASH_DRIFT is the dominant, non-actionable line in normal use (it
+// never blocks; it only ever says "you edited things"), so it is hidden by default
+// and collapsed to one discoverable line. `show_drift=true` lists it. `--json` and
+// the return tuples always carry drift, so the structured channel is unaffected.
+// The error/warn/info summary counts the real totals either way.
+fn render_text(label: &str, findings: &[Finding], show_drift: bool) -> String {
     if findings.is_empty() {
         return format!("{}: clean (no findings)", label);
     }
     let mut out = vec![format!("{}:", label)];
+    let mut n_drift_hidden = 0usize;
     for f in sort_findings(findings) {
+        if !show_drift && f.code == "HASH_DRIFT" {
+            n_drift_hidden += 1;
+            continue;
+        }
         let where_ = match f.line {
             Some(n) => format!("L{}", n),
             None => "-".to_string(),
         };
         out.push(format!("  [{:5}] {:16} {:>5}  {}", f.level.as_str(), f.code, where_, f.message));
+    }
+    if n_drift_hidden > 0 {
+        let noun = if n_drift_hidden == 1 { "finding" } else { "findings" };
+        out.push(format!(
+            "  -> {} hash-drift {} hidden (--show-drift to list)",
+            n_drift_hidden, noun
+        ));
     }
     let n_err = findings.iter().filter(|f| f.level.as_str() == "error").count();
     let n_warn = findings.iter().filter(|f| f.level.as_str() == "warn").count();
@@ -165,6 +182,7 @@ fn finding_json(f: &Finding) -> String {
 
 fn cmd_lint(args: &[String]) -> ExitCode {
     let mut json = false;
+    let mut show_drift = false;
     let mut before: Option<String> = None;
     let mut files: Vec<String> = Vec::new();
 
@@ -172,6 +190,7 @@ fn cmd_lint(args: &[String]) -> ExitCode {
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
+            "--show-drift" => show_drift = true,
             "--before" => {
                 i += 1;
                 if i >= args.len() {
@@ -233,7 +252,7 @@ fn cmd_lint(args: &[String]) -> ExitCode {
         println!("{{\n{}\n}}", blocks.join(",\n"));
     } else {
         let rendered: Vec<String> =
-            results.iter().map(|(label, fs)| render_text(label, fs)).collect();
+            results.iter().map(|(label, fs)| render_text(label, fs, show_drift)).collect();
         println!("{}", rendered.join("\n"));
     }
 
