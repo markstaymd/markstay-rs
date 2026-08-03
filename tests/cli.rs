@@ -156,3 +156,57 @@ fn guardrail_hash_drift_stays_warn_in_return_tuples() {
     let diff_drift: Vec<_> = diff.iter().filter(|f| f.code == "HASH_DRIFT").collect();
     assert!(!diff_drift.is_empty() && diff_drift.iter().all(|f| f.level.as_str() == "warn"));
 }
+
+// --- preserve (SPEC.md §11) -------------------------------------------------
+//
+// The verb the eval says matters most: an instructed rewrite keeps ~96-100% of
+// markers against ~5% for a naive one. Its CLI contract is deliberately dull, no
+// parsing and no git, so these pin the shape rather than the content (the text
+// itself is held byte-identical to the Python and JS copies by the conformance
+// corpus, in tests/conformance.rs).
+
+#[test]
+fn preserve_prints_the_instruction_verbatim() {
+    let out = stdout(&["preserve"]);
+    assert_eq!(out, format!("{}\n", markstay::PRESERVE_INSTRUCTION));
+    assert_eq!(exit_code(&["preserve"]), 0);
+}
+
+#[test]
+fn preserve_wrap_composes_the_measured_prompt_shape() {
+    let doc_body = "# Title\n\nA paragraph.\n";
+    let p = tmp_md("preserve", doc_body);
+    let path = p.to_str().unwrap();
+    let out = stdout(&["preserve", "--wrap", path, "--task", "Tighten it."]);
+    std::fs::remove_file(&p).ok();
+
+    let want = format!("{}\n", markstay::preserve_wrap(doc_body, Some("Tighten it.")));
+    assert_eq!(out, want);
+    // task first, then the instruction, then the document behind the rule
+    let t = out.find("Tighten it.").expect("task present");
+    let i = out.find(markstay::PRESERVE_INSTRUCTION).expect("instruction present");
+    let d = out.find("A paragraph.").expect("document present");
+    assert!(t < i && i < d);
+}
+
+#[test]
+fn preserve_rejects_a_bare_file_and_a_task_without_wrap() {
+    // A bare FILE is the plausible mistake (every other verb takes one), so it has
+    // to fail loudly rather than print the instruction and ignore the doc.
+    assert_eq!(exit_code(&["preserve", "doc.md"]), 2);
+    assert_eq!(exit_code(&["preserve", "--task", "Tighten it."]), 2);
+    assert_eq!(exit_code(&["preserve", "--wrap"]), 2);
+    assert_eq!(exit_code(&["preserve", "--wrap", "no-such-file.md"]), 2);
+}
+
+#[test]
+fn preserve_rejects_input_that_is_not_utf8() {
+    // Rust's read_to_string already rejects; JS and Python were made to match,
+    // because Node substitutes U+FFFD and Python surrogate-escapes, which is
+    // precisely how three implementations stop emitting the same bytes.
+    let p = std::env::temp_dir().join(format!("markstay-cli-{}-badutf8.md", std::process::id()));
+    std::fs::write(&p, b"Body \xff byte.\n").expect("write temp file");
+    let code = exit_code(&["preserve", "--wrap", p.to_str().unwrap()]);
+    std::fs::remove_file(&p).ok();
+    assert_eq!(code, 2);
+}

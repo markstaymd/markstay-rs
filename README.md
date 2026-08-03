@@ -102,12 +102,31 @@ The write path (SPEC.md §6/§7/§8) adds `mint_id`, `format_marker`,
 `DEFAULT_ALPHABET` / `DEFAULT_ID_LENGTH` constants). `mint_id` takes an injected
 byte source, so the core never calls the OS and stays `no_std`.
 
+## Keeping stays alive through an agent's edit (start here)
+
+Almost every stay that goes missing goes missing the same way: a model rewrote the
+document and did not know the markers were load-bearing. The eval measured both
+halves of the fix, and they are not close , a naive "clean this up" rewrite keeps
+about **5%** of markers, the same rewrite carrying the SPEC.md §11 instruction keeps
+**~96-100%**, across five models and three vendors. That outweighs model tier.
+
+`markstay preserve` prints that instruction (`--wrap DOC.md` wraps a document into
+a complete editing prompt); `markstay::PRESERVE_INSTRUCTION` and
+`markstay::preserve_wrap` are the library equivalents. Pure text composition , no
+parsing, no I/O , and byte-identical to the npm and PyPI packages, held there by
+the shared conformance corpus rather than by convention.
+
+Everything below is the **backstop**: it catches loss after the fact, it does not
+prevent it. Ship the instruction first.
+
 ## CLI
 
 A single static binary, suitable as a pre-commit / CI gate. Same subcommand
 grammar as the npm and PyPI `markstay` CLIs:
 
 ```sh
+markstay preserve                     # the §11 instruction for an editing agent
+markstay preserve --wrap DOC.md       # that instruction + the doc, as a prompt
 markstay lint    FILE...              # well-formedness + intra-doc checks (§7/§8/§10)
 markstay lint    --before OLD.md NEW  # regeneration diff (§11)
 markstay lint    --json ...           # machine-readable findings
@@ -139,9 +158,12 @@ old.md -> new.md:
 
 `tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
 gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **295/295 corpus vectors pass** (66 hand-authored `spec/` + 229
-generated `gen/`, 18 files), incl. every `seqmatch` vector (143, with non-BMP) to
-delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python.
+identical key sets. **303/303 corpus vectors pass** (73 hand-authored `spec/` + 230
+generated `gen/`, 19 files), incl. every `seqmatch` vector (143, with non-BMP) to
+delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python. The
+`preserve` category is the odd one: it holds the §11 instruction as plain prose
+rather than a computation, so this crate's `const` copy of it cannot drift from the
+npm and PyPI copies without failing here.
 
 ```sh
 cargo test          # conformance corpus + unit tests

@@ -19,6 +19,7 @@ pub mod id;
 pub mod lint;
 pub mod markers;
 pub mod parse;
+pub mod preserve;
 pub mod quote;
 pub mod ratio;
 pub mod resolve;
@@ -59,3 +60,5 @@ pub use resolve::{
     build_anchors, build_anchors_from_blocks, resolve, resolve_over_blocks, Anchor, Resolution,
     DEFAULT_MARGIN, DEFAULT_THRESHOLD,
 };
+
+pub use preserve::{preserve_wrap, PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY};

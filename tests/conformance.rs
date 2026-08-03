@@ -17,9 +17,10 @@ use serde_json::{json, Map, Value};
 
 use markstay::{
     best_match, body_hash, body_score, build_anchors, context_bonus, find_markers, lint_diff,
-    lint_document, matching_blocks, mint_id, normalize_body, parse_document, quote_ratio, ratio,
-    repair_duplicates, resolve, restamp, sort_findings, stamp, Block, Finding, Marker,
-    RestampOptions, Selector, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
+    lint_document, matching_blocks, mint_id, normalize_body, parse_document, preserve_wrap,
+    quote_ratio, ratio, repair_duplicates, resolve, restamp, sort_findings, stamp, Block, Finding,
+    Marker, RestampOptions, Selector, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
+    PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY,
 };
 
 const TOL: f64 = 1e-9;
@@ -107,6 +108,14 @@ fn strings(v: &Value) -> Vec<String> {
 
 // --- per-category verifiers: (vector) -> (got, want) ------------------------
 
+/// Every category `verify` can handle. The corpus must carry vectors for all of
+/// them; see the coverage assertion in `corpus()`. Keep in lockstep with the
+/// match arms below (an arm without an entry here is an unenforced verifier).
+const VERIFIED_CATEGORIES: &[&str] = &[
+    "hash", "markers", "parse", "lint", "diff", "seqmatch", "score", "resolve", "stamp", "mint",
+    "preserve",
+];
+
 fn verify(category: &str, v: &Value) -> (Value, Value) {
     match category {
         "hash" => {
@@ -182,8 +191,22 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
         }
         "stamp" => verify_stamp(v),
         "mint" => verify_mint(v),
+        "preserve" => verify_preserve(v),
         other => panic!("unknown category {:?}", other),
     }
+}
+
+/// §11 preservation-instruction vectors. The instruction text ships as a `const`
+/// in this crate (an installed crate has no corpus on disk), so this is what
+/// holds that copy byte-identical to the Python and JS ones.
+fn verify_preserve(v: &Value) -> (Value, Value) {
+    let got = match str_field(v, "fn") {
+        "instruction" => PRESERVE_INSTRUCTION.to_string(),
+        "return_only" => PRESERVE_RETURN_ONLY.to_string(),
+        "wrap" => preserve_wrap(str_field(v, "doc"), v["task"].as_str()),
+        other => panic!("unknown preserve fn {:?}", other),
+    };
+    (json!(got), v["expected"].clone())
 }
 
 /// Id-minting vectors (§6). A fixed byte array is the injected source, consumed
@@ -337,12 +360,16 @@ fn corpus() {
 
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
 
     for (tier, path) in &files {
         let data: Value =
             serde_json::from_str(&fs::read_to_string(path).expect("read corpus file"))
                 .expect("parse corpus json");
         let category = data["category"].as_str().expect("category string");
+        if !seen.iter().any(|c| c == category) {
+            seen.push(category.to_string());
+        }
         for v in data["vectors"].as_array().expect("vectors array") {
             total += 1;
             let name = v["name"].as_str().unwrap_or("?");
@@ -355,6 +382,14 @@ fn corpus() {
             }
         }
     }
+
+    // A verifier with no vectors is a check that silently is not running, and the
+    // hundreds of unrelated vectors keep the suite green while it does nothing.
+    // That is the failure class this project exists to catch, so a category
+    // missing from the corpus fails here rather than passing quietly.
+    let missing: Vec<&str> =
+        VERIFIED_CATEGORIES.iter().copied().filter(|c| !seen.iter().any(|s| s == c)).collect();
+    assert!(missing.is_empty(), "verifiers with no vectors in the corpus: {:?}", missing);
 
     let passed = total - failures.len();
     println!("\n{}/{} corpus vectors pass ({} files)", passed, total, files.len());

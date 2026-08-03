@@ -2,11 +2,17 @@
 //! Python CLI in impl/py/src/markstay/cli.py and the npm `markstay` CLI). A single
 //! static binary that needs no interpreter, suitable as a pre-commit / CI gate.
 //!
+//!     markstay preserve                     print the §11 instruction for an agent
+//!     markstay preserve --wrap DOC.md       that instruction + the doc, as a prompt
 //!     markstay lint    FILE...              well-formedness + intra-doc checks
 //!     markstay lint    --before OLD.md NEW  regeneration diff (SPEC.md §11)
 //!     markstay stamp   FILE... [-w]         mint ids for unmarked blocks (§6)
 //!     markstay restamp FILE... [-w]         refresh drifted hashes (§8)
 //!     markstay repair  FILE... [-w]         mint fresh ids for duplicate ids (§7)
+//!
+//! `preserve` is listed first because measurement puts it first: an instructed
+//! rewrite keeps ~96-100% of markers against ~5% for a naive one, so the
+//! instruction prevents loss and every check below only catches it.
 //!
 //! `lint` exits non-zero when any error-level finding is reported, so it gates a
 //! commit hook or an agent's post-edit step. The write verbs print the result to
@@ -18,15 +24,17 @@ use std::fs;
 use std::process::ExitCode;
 
 use markstay::{
-    has_errors, lint_diff, lint_document, mint_id, repair_duplicates, restamp, sort_findings,
-    stamp, Finding, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
-    DEFAULT_ID_LENGTH,
+    has_errors, lint_diff, lint_document, mint_id, preserve_wrap, repair_duplicates, restamp,
+    sort_findings, stamp, Finding, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET,
+    DEFAULT_HASH_LENGTH, DEFAULT_ID_LENGTH, PRESERVE_INSTRUCTION,
 };
 
 fn usage() -> &'static str {
     "usage: markstay <command> [options] FILE...\n\
      \n\
      commands:\n\
+     \x20 preserve                         print the §11 instruction for an agent\n\
+     \x20 preserve --wrap DOC.md           that instruction + the doc, as a prompt\n\
      \x20 lint     FILE...                 well-formedness + intra-doc checks\n\
      \x20 lint     --before OLD.md NEW.md  regeneration diff\n\
      \x20 stamp    FILE... [-w]            mint ids for unmarked blocks\n\
@@ -34,7 +42,12 @@ fn usage() -> &'static str {
      \x20 repair   FILE... [-w]            mint fresh ids for duplicate ids\n\
      \n\
      common options: --json (lint), --show-drift (lint), -w/--write, --mdx,\n\
-     \x20               --no-hash, --hash-length N (stamp/restamp), --add-missing (restamp)"
+     \x20               --no-hash, --hash-length N (stamp/restamp), --add-missing (restamp),\n\
+     \x20               --wrap FILE / --task TEXT (preserve)\n\
+     \n\
+     preserve is listed first because measurement puts it first: an instructed rewrite\n\
+     keeps ~96-100% of markers against ~5% for a naive one, so the instruction prevents\n\
+     loss and every check below only catches it."
 }
 
 fn arg_err(msg: &str) -> ExitCode {
@@ -98,6 +111,62 @@ fn read_file(path: &str) -> Result<String, ()> {
     fs::read_to_string(path).map_err(|e| {
         eprintln!("error: cannot read {}: {}", path, e);
     })
+}
+
+/// The §11 instruction, on its own or wrapped around a document. No parsing, no
+/// git, no file writes: this verb only ever composes text, which is why it costs
+/// the same in all three ecosystems and lands the half of §11 that measurement
+/// says prevents loss rather than catches it.
+fn cmd_preserve(args: &[String]) -> ExitCode {
+    let mut wrap: Option<String> = None;
+    let mut task: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--wrap" | "--task" => {
+                let flag = args[i].clone();
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return arg_err(&format!("{} needs a value", flag));
+                };
+                if flag == "--wrap" {
+                    wrap = Some(val.clone());
+                } else {
+                    task = Some(val.clone());
+                }
+            }
+            other => {
+                return arg_err(&format!(
+                    "preserve takes no FILE arguments (use --wrap {:?})",
+                    other
+                ))
+            }
+        }
+        i += 1;
+    }
+
+    if task.is_some() && wrap.is_none() {
+        return arg_err("--task only applies with --wrap");
+    }
+    let Some(path) = wrap else {
+        println!("{}", PRESERVE_INSTRUCTION);
+        return ExitCode::SUCCESS;
+    };
+    let doc = if path == "-" {
+        let mut buf = String::new();
+        if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+            eprintln!("error: cannot read stdin: {}", e);
+            return ExitCode::from(2);
+        }
+        buf
+    } else {
+        match read_file(&path) {
+            Ok(s) => s,
+            Err(()) => return ExitCode::from(2),
+        }
+    };
+    println!("{}", preserve_wrap(&doc, task.as_deref()));
+    ExitCode::SUCCESS
 }
 
 fn parse_positive(s: &str) -> Result<usize, ()> {
@@ -460,6 +529,7 @@ fn main() -> ExitCode {
             println!("{}", usage());
             ExitCode::SUCCESS
         }
+        "preserve" => cmd_preserve(&argv[1..]),
         "lint" => cmd_lint(&argv[1..]),
         "stamp" => cmd_stamp(&argv[1..]),
         "restamp" => cmd_restamp(&argv[1..]),
