@@ -6,9 +6,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # `stable` is the gate: it decides this workflow's status, and it is the toolchain
+  # publish.yml builds and publishes with. `beta` is an early-warning canary for
+  # toolchain drift, so it reports without gating , a new lint landing in beta says
+  # something about next quarter's compiler, not about whether this crate is correct
+  # today. fail-fast is off so the canary cannot cancel the gate mid-run.
   test:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
     strategy:
+      fail-fast: false
       matrix:
         toolchain: ["stable", "beta"]
     steps:
