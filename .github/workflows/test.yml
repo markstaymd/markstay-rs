@@ -26,4 +26,6 @@ jobs:
           components: clippy
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Verify zero runtime dependencies
+        run: test "$(cargo tree --edges normal --prefix none | wc -l)" -eq 1
       - run: cargo build --release

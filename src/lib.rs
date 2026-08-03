@@ -25,6 +25,7 @@ pub mod ratio;
 pub mod resolve;
 pub mod segment;
 pub mod sha256;
+pub mod staged;
 pub mod stamp;
 pub mod text;
 
@@ -62,3 +63,7 @@ pub use resolve::{
 };
 
 pub use preserve::{preserve_wrap, PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY};
+
+pub use staged::{
+    check_entries, is_markdown, BaselinePairing, CheckReport, CommitEntry, StagedCheck,
+};

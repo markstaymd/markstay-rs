@@ -102,6 +102,12 @@ The write path (SPEC.md §6/§7/§8) adds `mint_id`, `format_marker`,
 `DEFAULT_ALPHABET` / `DEFAULT_ID_LENGTH` constants). `mint_id` takes an injected
 byte source, so the core never calls the OS and stays `no_std`.
 
+The Git-independent commit-check core adds `CommitEntry`, `check_entries`, and
+`StagedCheck`. It accepts already-materialized before/after text and returns the
+selected baseline pairings, findings, and non-blocking move/deletion notes. Git
+process and filesystem I/O stay in the CLI binary, so the library remains
+`no_std` + `alloc` and zero-dependency.
+
 ## Keeping stays alive through an agent's edit (start here)
 
 Almost every stay that goes missing goes missing the same way: a model rewrote the
@@ -130,14 +136,22 @@ markstay preserve --wrap DOC.md       # that instruction + the doc, as a prompt
 markstay lint    FILE...              # well-formedness + intra-doc checks (§7/§8/§10)
 markstay lint    --before OLD.md NEW  # regeneration diff (§11)
 markstay lint    --json ...           # machine-readable findings
+markstay check-staged [FILE...]       # check the staged commit against HEAD (§11)
+markstay check-worktree [FILE...]     # check files on disk against HEAD (§11)
 markstay stamp   FILE... [-w]         # mint ids for unmarked blocks (§6)
 markstay restamp FILE... [-w]         # refresh drifted hashes (§8)
 markstay repair  FILE... [-w]         # mint fresh ids for duplicate ids (§7)
 ```
 
-`lint` exits non-zero when any error-level finding is reported. The write verbs
-print the result to stdout by default; `-w`/`--write` edits files in place
-(required for more than one file).
+`lint` and the two check verbs exit non-zero when an error-level finding is
+reported. `check-staged` reads the index for a commit hook; `check-worktree` reads
+staged, unstaged, and untracked files for a post-edit check. Both stay silent when
+there is nothing actionable, resolve recorded renames from `HEAD:<old path>`, and
+pair delete/create rewrites with the deleted document sharing the most stay ids.
+An id moved to another changed document is a non-blocking note, not a false loss.
+
+The write verbs print the result to stdout by default; `-w`/`--write` edits files
+in place (required for more than one file).
 
 `HASH_DRIFT` (a block edited in place) never blocks and is the dominant line in a
 normal edit, so the text render **hides it by default** and collapses it to one
@@ -158,12 +172,14 @@ old.md -> new.md:
 
 `tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
 gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **303/303 corpus vectors pass** (73 hand-authored `spec/` + 230
-generated `gen/`, 19 files), incl. every `seqmatch` vector (143, with non-BMP) to
+identical key sets. **316/316 corpus vectors pass** (86 hand-authored `spec/` + 230
+generated `gen/`, 20 files), incl. every `seqmatch` vector (143, with non-BMP) to
 delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python. The
+`check` category carries 13 commit-shaped inputs and asserts baseline pairings,
+findings, moves, Markdown tracking departures, deletion notes, and scope. The
 `preserve` category is the odd one: it holds the §11 instruction as plain prose
-rather than a computation, so this crate's `const` copy of it cannot drift from the
-npm and PyPI copies without failing here.
+rather than a computation, so this crate's `const` copy cannot drift from the npm
+and PyPI copies without failing here.
 
 ```sh
 cargo test          # conformance corpus + unit tests

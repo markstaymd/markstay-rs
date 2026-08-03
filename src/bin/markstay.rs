@@ -6,6 +6,8 @@
 //!     markstay preserve --wrap DOC.md       that instruction + the doc, as a prompt
 //!     markstay lint    FILE...              well-formedness + intra-doc checks
 //!     markstay lint    --before OLD.md NEW  regeneration diff (SPEC.md §11)
+//!     markstay check-staged [FILE...]       check the staged commit (§11)
+//!     markstay check-worktree [FILE...]     check files on disk against HEAD (§11)
 //!     markstay stamp   FILE... [-w]         mint ids for unmarked blocks (§6)
 //!     markstay restamp FILE... [-w]         refresh drifted hashes (§8)
 //!     markstay repair  FILE... [-w]         mint fresh ids for duplicate ids (§7)
@@ -21,12 +23,14 @@
 //! deferred from v1.
 
 use std::fs;
-use std::process::ExitCode;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, ExitCode};
 
 use markstay::{
-    has_errors, lint_diff, lint_document, mint_id, preserve_wrap, repair_duplicates, restamp,
-    sort_findings, stamp, Finding, RestampOptions, StampOptions, Syntax, DEFAULT_ALPHABET,
-    DEFAULT_HASH_LENGTH, DEFAULT_ID_LENGTH, PRESERVE_INSTRUCTION,
+    check_entries, has_errors, is_markdown, lint_diff, lint_document, mint_id, preserve_wrap,
+    repair_duplicates, restamp, sort_findings, stamp, CommitEntry, Finding, RestampOptions,
+    StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH, DEFAULT_ID_LENGTH,
+    PRESERVE_INSTRUCTION,
 };
 
 fn usage() -> &'static str {
@@ -37,11 +41,13 @@ fn usage() -> &'static str {
      \x20 preserve --wrap DOC.md           that instruction + the doc, as a prompt\n\
      \x20 lint     FILE...                 well-formedness + intra-doc checks\n\
      \x20 lint     --before OLD.md NEW.md  regeneration diff\n\
+     \x20 check-staged [FILE...]           check the staged commit against HEAD\n\
+     \x20 check-worktree [FILE...]         check files on disk against HEAD\n\
      \x20 stamp    FILE... [-w]            mint ids for unmarked blocks\n\
      \x20 restamp  FILE... [-w]            refresh drifted hashes\n\
      \x20 repair   FILE... [-w]            mint fresh ids for duplicate ids\n\
      \n\
-     common options: --json (lint), --show-drift (lint), -w/--write, --mdx,\n\
+     common options: --json / --show-drift (lint/check), -w/--write, --mdx,\n\
      \x20               --no-hash, --hash-length N (stamp/restamp), --add-missing (restamp),\n\
      \x20               --wrap FILE / --task TEXT (preserve)\n\
      \n\
@@ -332,6 +338,298 @@ fn cmd_lint(args: &[String]) -> ExitCode {
     }
 }
 
+// --- check-staged / check-worktree -----------------------------------------
+
+#[derive(Clone, Debug)]
+struct GitChange {
+    status: char,
+    source: String,
+    destination: String,
+}
+
+#[derive(Clone, Debug)]
+struct OwnedCommitEntry {
+    status: char,
+    source: String,
+    destination: String,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+fn git(args: &[String], allow_fail: bool) -> Result<Option<String>, String> {
+    let output =
+        Command::new("git").args(args).output().map_err(|e| format!("cannot run git: {}", e))?;
+    if !output.status.success() {
+        if allow_fail {
+            return Ok(None);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()));
+    }
+    String::from_utf8(output.stdout)
+        .map(Some)
+        .map_err(|_| format!("git {} returned text that is not valid UTF-8", args.join(" ")))
+}
+
+fn git_text(args: &[&str], allow_fail: bool) -> Result<Option<String>, String> {
+    git(&args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(), allow_fail)
+}
+
+fn parse_name_status(raw: &str) -> Vec<GitChange> {
+    let fields: Vec<&str> = raw.split('\0').collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < fields.len() && !fields[i].is_empty() {
+        let Some(status) = fields[i].chars().next() else {
+            break;
+        };
+        if matches!(status, 'R' | 'C') && i + 2 < fields.len() {
+            out.push(GitChange {
+                status,
+                source: fields[i + 1].to_string(),
+                destination: fields[i + 2].to_string(),
+            });
+            i += 3;
+        } else if i + 1 < fields.len() {
+            out.push(GitChange {
+                status,
+                source: fields[i + 1].to_string(),
+                destination: fields[i + 1].to_string(),
+            });
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn staged_changes() -> Result<Vec<GitChange>, String> {
+    let raw = git_text(&["diff", "--cached", "--name-status", "-z", "--find-renames"], false)?
+        .unwrap_or_default();
+    Ok(parse_name_status(&raw))
+}
+
+fn worktree_changes() -> Result<Vec<GitChange>, String> {
+    let raw = match git_text(&["diff", "HEAD", "--name-status", "-z", "--find-renames"], true)? {
+        Some(raw) => raw,
+        None => git_text(&["diff", "--cached", "--name-status", "-z", "--find-renames"], true)?
+            .unwrap_or_default(),
+    };
+    let mut out = parse_name_status(&raw);
+    let untracked =
+        git_text(&["ls-files", "--others", "--exclude-standard", "-z"], false)?.unwrap_or_default();
+    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+        out.push(GitChange {
+            status: 'A',
+            source: path.to_string(),
+            destination: path.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn git_show(revision: &str, path: &str) -> Result<Option<String>, String> {
+    git(&["show".to_string(), format!("{}:{}", revision, path)], true)
+}
+
+fn materialize_changes(
+    changes: &[GitChange],
+    root: &Path,
+    worktree: bool,
+) -> Result<Vec<OwnedCommitEntry>, String> {
+    let mut out = Vec::new();
+    for change in changes {
+        let tracked = match change.status {
+            'D' => is_markdown(&change.source),
+            'R' => is_markdown(&change.source) || is_markdown(&change.destination),
+            _ => is_markdown(&change.destination),
+        };
+        if !tracked {
+            continue;
+        }
+
+        let before_path = if matches!(change.status, 'R' | 'C' | 'D') {
+            &change.source
+        } else {
+            &change.destination
+        };
+        let before = git_show("HEAD", before_path)?;
+        let after = if change.status == 'D' {
+            None
+        } else if worktree {
+            // Match the Python and JS commands: an unreadable or invalid UTF-8
+            // worktree file is treated as empty and linted from there.
+            Some(fs::read_to_string(root.join(&change.destination)).unwrap_or_default())
+        } else {
+            git_show("", &change.destination)?.or_else(|| Some(String::new()))
+        };
+        out.push(OwnedCommitEntry {
+            status: change.status,
+            source: change.source.clone(),
+            destination: change.destination.clone(),
+            before,
+            after,
+        });
+    }
+    Ok(out)
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            }
+        }
+    }
+    out
+}
+
+fn repo_relative(path: &str, root: &Path) -> Result<String, String> {
+    let input = Path::new(path);
+    let absolute = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| root.to_path_buf()).join(input)
+    };
+    let normalized = normalize_lexical(&absolute);
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("cannot resolve git work tree {}: {}", root.display(), error))?;
+    let canonical = fs::canonicalize(&normalized).unwrap_or(normalized);
+    let relative = canonical
+        .strip_prefix(&canonical_root)
+        .map_err(|_| format!("scoped path is outside the git work tree: {}", path))?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn print_check_json(result: &markstay::StagedCheck) {
+    let reports: Vec<String> = result
+        .reports
+        .iter()
+        .map(|report| {
+            let findings: Vec<String> =
+                sort_findings(&report.findings).iter().map(finding_json).collect();
+            format!(
+                "    \"{}\": [\n      {}\n    ]",
+                json_escape(&report.label),
+                findings.join(",\n      ")
+            )
+        })
+        .collect();
+    let findings = if reports.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{\n{}\n  }}", reports.join(",\n"))
+    };
+    let notes = if result.notes.is_empty() {
+        "[]".to_string()
+    } else {
+        let items: Vec<String> =
+            result.notes.iter().map(|note| format!("    \"{}\"", json_escape(note))).collect();
+        format!("[\n{}\n  ]", items.join(",\n"))
+    };
+    println!("{{\n  \"findings\": {},\n  \"notes\": {}\n}}", findings, notes);
+}
+
+fn cmd_check(verb: &str, args: &[String], worktree: bool) -> ExitCode {
+    let mut json = false;
+    let mut show_drift = false;
+    let mut files = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--show-drift" => show_drift = true,
+            "-h" | "--help" => {
+                println!("{}", usage());
+                return ExitCode::SUCCESS;
+            }
+            other if other.starts_with('-') => {
+                return arg_err(&format!("unknown option {}", other));
+            }
+            other => files.push(other.to_string()),
+        }
+    }
+
+    let root = match git_text(&["rev-parse", "--show-toplevel"], true) {
+        Ok(Some(path)) => PathBuf::from(path.trim()),
+        Ok(None) => return arg_err(&format!("{} must run inside a git work tree", verb)),
+        Err(error) => {
+            eprintln!("markstay: {}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let scope: Vec<String> =
+        match files.iter().map(|path| repo_relative(path, &root)).collect::<Result<Vec<_>, _>>() {
+            Ok(scope) => scope,
+            Err(error) => {
+                eprintln!("markstay: {}", error);
+                return ExitCode::from(2);
+            }
+        };
+
+    let changes = match if worktree { worktree_changes() } else { staged_changes() } {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("markstay: {}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let owned = match materialize_changes(&changes, &root, worktree) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("markstay: {}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let entries: Vec<CommitEntry<'_>> = owned
+        .iter()
+        .map(|entry| CommitEntry {
+            status: entry.status,
+            source: &entry.source,
+            destination: &entry.destination,
+            before: entry.before.as_deref(),
+            after: entry.after.as_deref(),
+        })
+        .collect();
+    let result = check_entries(&entries, &scope);
+
+    if json {
+        print_check_json(&result);
+    } else {
+        for report in &result.reports {
+            let actionable = report.findings.iter().any(|finding| {
+                finding.level.as_str() == "error"
+                    || (finding.level.as_str() == "warn" && finding.code != "HASH_DRIFT")
+            });
+            if show_drift || actionable {
+                eprintln!("{}", render_text(&report.label, &report.findings, show_drift));
+            }
+        }
+        if !result.notes.is_empty() {
+            eprintln!("markstay: stays that changed document (not blocking):");
+            for note in &result.notes {
+                eprintln!("  {}", note);
+            }
+        }
+    }
+
+    if result.has_errors() {
+        eprintln!(
+            "\nmarkstay: this commit breaks a stay (dropped / duplicated / relocated / \
+             malformed). Fix it, or bypass once with `git commit --no-verify`."
+        );
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 // --- write verbs (stamp / restamp / repair) ----------------------------------
 
 /// Shared driver: run `op(text) -> (text, note)` per file, then either emit to
@@ -531,6 +829,8 @@ fn main() -> ExitCode {
         }
         "preserve" => cmd_preserve(&argv[1..]),
         "lint" => cmd_lint(&argv[1..]),
+        "check-staged" => cmd_check("check-staged", &argv[1..], false),
+        "check-worktree" => cmd_check("check-worktree", &argv[1..], true),
         "stamp" => cmd_stamp(&argv[1..]),
         "restamp" => cmd_restamp(&argv[1..]),
         "repair" => cmd_repair(&argv[1..]),

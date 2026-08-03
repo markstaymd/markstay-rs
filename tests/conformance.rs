@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use markstay::{
-    best_match, body_hash, body_score, build_anchors, context_bonus, find_markers, lint_diff,
-    lint_document, matching_blocks, mint_id, normalize_body, parse_document, preserve_wrap,
-    quote_ratio, ratio, repair_duplicates, resolve, restamp, sort_findings, stamp, Block, Finding,
-    Marker, RestampOptions, Selector, StampOptions, Syntax, DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH,
-    PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY,
+    best_match, body_hash, body_score, build_anchors, check_entries, context_bonus, find_markers,
+    lint_diff, lint_document, matching_blocks, mint_id, normalize_body, parse_document,
+    preserve_wrap, quote_ratio, ratio, repair_duplicates, resolve, restamp, sort_findings, stamp,
+    Block, CommitEntry, Finding, Marker, RestampOptions, Selector, StampOptions, Syntax,
+    DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH, PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY,
 };
 
 const TOL: f64 = 1e-9;
@@ -113,7 +113,7 @@ fn strings(v: &Value) -> Vec<String> {
 /// match arms below (an arm without an entry here is an unenforced verifier).
 const VERIFIED_CATEGORIES: &[&str] = &[
     "hash", "markers", "parse", "lint", "diff", "seqmatch", "score", "resolve", "stamp", "mint",
-    "preserve",
+    "preserve", "check",
 ];
 
 fn verify(category: &str, v: &Value) -> (Value, Value) {
@@ -192,6 +192,7 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
         "stamp" => verify_stamp(v),
         "mint" => verify_mint(v),
         "preserve" => verify_preserve(v),
+        "check" => verify_check(v),
         other => panic!("unknown category {:?}", other),
     }
 }
@@ -207,6 +208,47 @@ fn verify_preserve(v: &Value) -> (Value, Value) {
         other => panic!("unknown preserve fn {:?}", other),
     };
     (json!(got), v["expected"].clone())
+}
+
+/// Commit-shaped baseline pairing and findings, with Git already materialized.
+fn verify_check(v: &Value) -> (Value, Value) {
+    let entries: Vec<CommitEntry<'_>> = v["entries"]
+        .as_array()
+        .expect("check entries array")
+        .iter()
+        .map(|entry| CommitEntry {
+            status: str_field(entry, "status").chars().next().expect("status char"),
+            source: str_field(entry, "src"),
+            destination: str_field(entry, "dst"),
+            before: entry.get("before").and_then(Value::as_str),
+            after: entry.get("after").and_then(Value::as_str),
+        })
+        .collect();
+    let scope = v.get("scope").map(strings).unwrap_or_default();
+    let result = check_entries(&entries, &scope);
+    let pairings: Vec<Value> = result
+        .pairings
+        .iter()
+        .map(|pairing| json!({ "path": pairing.path, "baseline": pairing.baseline }))
+        .collect();
+    let reports: Vec<Value> = result
+        .reports
+        .iter()
+        .map(|report| {
+            let findings: Vec<Value> = sort_findings(&report.findings)
+                .iter()
+                .map(|finding| finding_value(finding, true))
+                .collect();
+            json!({ "label": report.label, "findings": findings })
+        })
+        .collect();
+    let got = json!({
+        "pairings": pairings,
+        "reports": reports,
+        "notes": result.notes,
+        "hasErrors": result.has_errors(),
+    });
+    (got, v["expected"].clone())
 }
 
 /// Id-minting vectors (§6). A fixed byte array is the injected source, consumed
