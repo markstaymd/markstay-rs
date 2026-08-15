@@ -526,3 +526,181 @@ fn repair_reminted_id_never_collides_with_existing_id() {
     let res = repair_duplicates(md, seq(vec!["taken".into(), "ok1".into()]));
     assert_eq!(res.renamed, vec![Renamed { from: "dup".into(), to: "ok1".into() }]);
 }
+
+// --- leading YAML frontmatter is metadata, not a block (SPEC.md §5) ---------
+
+const FM_DOC: &str = "---\nstatus: active\nowner: tim\n---\n\n# Heading\n\nBody para.\n";
+
+fn contents(md: &str) -> Vec<String> {
+    parse_document(md).into_iter().map(|b| b.content).collect()
+}
+
+#[test]
+fn frontmatter_is_not_a_block() {
+    assert_eq!(contents(FM_DOC), ["# Heading", "Body para."]);
+}
+
+#[test]
+fn frontmatter_does_not_shift_line_numbers() {
+    // blanking is line-for-line, so reported lines stay true to the source
+    let got: Vec<(i64, usize)> = parse_document(FM_DOC).iter().map(|b| (b.index, b.line)).collect();
+    assert_eq!(got, [(0, 6), (1, 8)]);
+}
+
+#[test]
+fn frontmatter_metadata_edit_does_not_drift_a_content_hash() {
+    let before: Vec<String> =
+        parse_document(FM_DOC).iter().map(|b| body_hash(&b.content, None)).collect();
+    let edited = FM_DOC.replace("status: active", "status: complete");
+    let after: Vec<String> =
+        parse_document(&edited).iter().map(|b| body_hash(&b.content, None)).collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn leading_thematic_break_with_no_closing_fence_is_a_block() {
+    assert_eq!(contents("---\n\n# Heading\n\nBody para.\n"), ["---", "# Heading", "Body para."]);
+}
+
+#[test]
+fn frontmatter_does_not_swallow_a_paragraph_between_two_thematic_breaks() {
+    // Regression, found by external review of the reference: the naive
+    // first-closing-fence rule silently ate `Intro paragraph.`
+    assert_eq!(
+        contents("---\n\nIntro paragraph.\n\n---\n\nBody.\n"),
+        ["---", "Intro paragraph.", "---", "Body."]
+    );
+}
+
+#[test]
+fn frontmatter_does_not_swallow_a_setext_heading() {
+    // `---` / `Title` / `---` is a thematic break plus a setext H2; the payload has
+    // to look like YAML before the span is treated as metadata.
+    assert!(contents("---\nTitle\n---\n\nBody.\n").join("\n").contains("Title"));
+}
+
+#[test]
+fn frontmatter_does_not_swallow_an_atx_heading() {
+    // Regression, found by external review: a YAML comment and an ATX heading are
+    // byte-identical, so `#` cannot be the evidence that a span is frontmatter.
+    assert!(contents("---\n# Heading\n---\nBody.\n").join("\n").contains("# Heading"));
+    assert!(contents("---\n# just a comment\n---\n\nBody.\n")
+        .join("\n")
+        .contains("# just a comment"));
+}
+
+#[test]
+fn a_payload_with_a_blank_line_is_not_frontmatter() {
+    // Fails towards ordinary Markdown: not skipping is a stray drift warning, while
+    // over-skipping silently destroys content.
+    assert!(contents("---\nstatus: active\n\nowner: tim\n---\n\nBody.\n")
+        .iter()
+        .any(|c| c.contains("status: active")));
+}
+
+#[test]
+fn an_empty_payload_is_not_frontmatter() {
+    assert!(contents("---\n---\n\nBody.\n").iter().any(|c| c.contains("---")));
+}
+
+#[test]
+fn yamlish_payload_forms_are_recognized() {
+    for payload in ["status: active", "- one\n- two", "empty:", "nested:\n  a: 1"] {
+        let md = format!("---\n{payload}\n---\n\nBody.\n");
+        assert_eq!(contents(&md), ["Body."], "payload: {payload:?}");
+    }
+}
+
+#[test]
+fn the_closing_fence_tolerates_trailing_whitespace_and_accepts_dots() {
+    assert_eq!(contents("---\nkey: v\n---   \n\nBody.\n"), ["Body."]);
+    assert_eq!(contents("---\ntitle: t\n...\n\n# Heading\n\nBody.\n"), ["# Heading", "Body."]);
+}
+
+#[test]
+fn crlf_is_normalized_before_frontmatter_detection() {
+    assert_eq!(contents("---\r\nkey: v\r\n---\r\n\r\n# H\r\n\r\nBody.\r\n"), ["# H", "Body."]);
+}
+
+#[test]
+fn frontmatter_is_only_recognized_at_document_start() {
+    let md = "# Heading\n\n---\ntitle: not frontmatter\n---\n\nBody.\n";
+    assert!(contents(md).join("\n").contains("title: not frontmatter"));
+}
+
+#[test]
+fn no_blank_line_after_the_closing_fence_still_splits_correctly() {
+    // A filter-the-chunks-afterwards implementation gets this one wrong.
+    assert_eq!(contents("---\ntitle: t\n---\n# Heading\n\nBody.\n"), ["# Heading", "Body."]);
+}
+
+#[test]
+fn the_yamlish_test_is_ascii_pinned_not_runtime_whitespace() {
+    // Cross-language agreement, found by external review of the port: `\S` means
+    // three different things in Python, ECMAScript and Rust, so the rule spells the
+    // ASCII set out. An ASCII control character is not a key start (the span stays
+    // ordinary Markdown); an exotic non-ASCII space is, exactly as for hashing (§8),
+    // where NBSP is content rather than whitespace.
+    assert!(
+        contents("---\n\u{1c}key: v\n---\n\nBody.\n").iter().any(|c| c.contains("key: v")),
+        "an ASCII control is not a key start"
+    );
+    for ch in ['\u{a0}', '\u{85}', '\u{feff}'] {
+        let md = format!("---\n{ch}key: v\n---\n\nBody.\n");
+        assert_eq!(contents(&md), ["Body."], "key start {ch:?}");
+        let md_item = format!("---\n- {ch}\n---\n\nBody.\n");
+        assert_eq!(contents(&md_item), ["Body."], "list item {ch:?}");
+    }
+}
+
+#[test]
+fn a_marker_after_the_closing_fence_is_an_orphan() {
+    // The visible consequence for a document stamped before this change.
+    assert!(all_codes("---\nkey: v\n---\n<!-- stay:x -->\n\nBody.\n").contains(&"ORPHAN_MARKER"));
+}
+
+#[test]
+fn a_marker_inside_the_frontmatter_payload_is_dropped() {
+    // Pins actual behaviour: the marker is blanked with the rest of the metadata
+    // and raises nothing. No tool writes one there (the stamper writes after the
+    // block), so this is documented rather than defended.
+    assert!(all_codes("---\nkey: v\n<!-- stay:x -->\n---\n\nBody.\n").is_empty());
+}
+
+#[test]
+fn stamp_leaves_frontmatter_unmarked_and_lints_clean() {
+    // The write path segments through the same frontmatter skip as the read path. A
+    // stamper that missed it would mint an id for the metadata, and the linter would
+    // then (correctly) report ORPHAN_MARKER on the marker it had just written.
+    let doc = "---\nstatus: active\nowner: tim\n---\n\n# Title\n\nBody paragraph.\n";
+    let res = stamp(doc, &StampOptions::default(), counter("id"));
+    assert_eq!(res.minted.len(), 2); // the heading and the paragraph, not the metadata
+    assert!(res.text.starts_with("---\nstatus: active\nowner: tim\n---\n"));
+    assert!(error_codes(&res.text).is_empty());
+
+    // blanking is line-for-line, so the insertion point still indexes the source
+    let lines: Vec<&str> = res.text.split('\n').collect();
+    assert_eq!(lines[5], "# Title");
+    assert!(lines[6].starts_with("<!-- stay:id00"));
+
+    // and a metadata-only edit of the stamped document stays clean
+    let edited = res.text.replace("status: active", "status: complete");
+    assert!(all_codes(&edited).is_empty());
+}
+
+#[test]
+fn stamp_still_identifies_a_leading_thematic_break() {
+    let res = stamp("---\n\nBody.\n", &StampOptions::default(), counter("id"));
+    assert_eq!(res.minted.len(), 2);
+    assert!(error_codes(&res.text).is_empty());
+}
+
+#[test]
+fn restamp_finds_no_hash_to_refresh_in_frontmatter() {
+    let doc = "---\nstatus: active\nowner: tim\n---\n\n# Title\n\nBody paragraph.\n";
+    let stamped = stamp(doc, &StampOptions::default(), counter("id")).text;
+    let edited = stamped.replace("owner: tim", "owner: someone");
+    let res = restamp(&edited, &RestampOptions::default());
+    assert!(res.refreshed.is_empty());
+    assert_eq!(res.text, edited);
+}

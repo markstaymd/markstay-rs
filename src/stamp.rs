@@ -22,7 +22,7 @@ use crate::markers::{
     Marker, Syntax,
 };
 use crate::parse::parse_document;
-use crate::segment::segment_blank_line;
+use crate::segment::{blank_frontmatter, segment_blank_line};
 use crate::text::ascii_trim;
 
 /// Default truncation for a freshly written hash (§8 permits any prefix). 12 hex =
@@ -245,10 +245,14 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     }
 
     // Walk blank-line chunks, mirroring parse.rs attachment, but keep each content
-    // block's last source line so a marker can be inserted right after it.
+    // block's last source line so a marker can be inserted right after it. Leading
+    // frontmatter is blanked first, exactly as parse_document does it, so the write
+    // path never mints an id for document metadata: a marker stamped there would
+    // have no block to attach to and lint would (correctly) call it an orphan.
+    // Blanking is line-for-line, so the insertion points below still index `norm`.
     let mut needs_stamp: Vec<PendingBlock> = Vec::new();
     let mut current: Option<usize> = None;
-    for (start, chunk) in segment_blank_line(&norm) {
+    for (start, chunk) in segment_blank_line(&blank_frontmatter(&norm)) {
         let content = ascii_trim(&strip_markers(&chunk)).to_string();
         let has_id = find_markers(&chunk, 0).iter().any(|mk| mk.id.is_some() && !mk.malformed);
         if !content.is_empty() {

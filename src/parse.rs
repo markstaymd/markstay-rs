@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use crate::hash::normalize_newlines;
 use crate::markers::{find_markers, strip_markers, Marker};
-use crate::segment::segment_blank_line;
+use crate::segment::{blank_frontmatter, segment_blank_line};
 use crate::text::ascii_trim;
 
 /// A content block with its attached markers (SPEC.md §5).
@@ -23,16 +23,17 @@ pub struct Block {
 }
 
 /// Parse into content blocks with their attached markers, blank-line mode
-/// (SPEC.md §5 baseline). A chunk that is only markers attaches to the previous
-/// content block; a marker-only chunk with no preceding content block is an
-/// orphan (`index == -1`).
+/// (SPEC.md §5 baseline). A leading YAML frontmatter block is metadata rather than
+/// content and is skipped before segmentation (see `segment::blank_frontmatter`).
+/// A chunk that is only markers attaches to the previous content block; a
+/// marker-only chunk with no preceding content block is an orphan (`index == -1`).
 ///
 /// CommonMark mode (§5.2) is deferred from the parser-free core; the mode is not
 /// a parameter here so an unknown mode is unrepresentable (rather than a runtime
 /// error, as in the JS/Python `mode=` string surface).
 pub fn parse_document(md: &str) -> Vec<Block> {
     let text = normalize_newlines(md);
-    let chunks = segment_blank_line(&text);
+    let chunks = segment_blank_line(&blank_frontmatter(&text));
 
     let mut blocks: Vec<Block> = Vec::new();
     let mut cidx: i64 = 0;

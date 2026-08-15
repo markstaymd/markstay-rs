@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.1-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.2-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.1), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.2), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -168,11 +168,39 @@ old.md -> new.md:
   -> 1 error, 0 warn, 0 info
 ```
 
+## Segmentation notes
+
+- **Leading YAML frontmatter is metadata, not a block (§5.3):** it is skipped before
+  segmentation, so it is never a block, never stamped, and never hashed , a
+  metadata-only edit (`status: draft` -> `status: done`) must not read as a content
+  edit. Recognition is conservative, because `---` is also a thematic break and a
+  setext underline: a span counts only when line 1 is exactly `---`, a later line is
+  exactly `---` or `...`, the payload between them is non-empty with no blank line,
+  and at least one payload line is unambiguously YAML (a `key:` or a `- item`). A
+  YAML *comment* does not count, since `# x` is also an ATX heading. "Unambiguously
+  YAML" is judged with ASCII whitespace, as everywhere else in the spec (§8/§9): the
+  runtimes' own Unicode whitespace sets disagree with each other, and a rule that
+  DELETES a span must not vary by implementation. The conditions confine the
+  ambiguity rather than removing it, and the rule does not pretend otherwise: a
+  blank-free payload that reads as YAML is *also* ordinary Markdown, whether it is a
+  sequence (`---` / `- Keep this` / `---`, a list between two thematic breaks) or a
+  mapping (`---` / `title: v` / `---`, a setext heading under one). Both are accepted
+  and their content is excluded. **Frontmatter wins**, the same call every mainstream
+  Markdown site generator makes on the same bytes. A document that fails any of the
+  four conditions (no opening `---`, no closing fence, a blank line in the payload,
+  no payload line that reads as YAML) falls through to ordinary Markdown, where the
+  worst case is a spurious block and a stray hash-drift warning. A marker an older version stamped onto
+  frontmatter usually raises `ORPHAN_MARKER`, and deleting that one marker is the
+  whole migration. **Lint before deleting**: with no blank line between the marker
+  and the content below it, blank-line segmentation reads one run and binds the
+  marker to that content, so it is live rather than orphaned and deleting it drops
+  a working id.
+
 ## Conformance
 
 `tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
 gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **316/316 corpus vectors pass** (86 hand-authored `spec/` + 230
+identical key sets. **332/332 corpus vectors pass** (102 hand-authored `spec/` + 230
 generated `gen/`, 20 files), incl. every `seqmatch` vector (143, with non-BMP) to
 delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python. The
 `check` category carries 13 commit-shaped inputs and asserts baseline pairings,
