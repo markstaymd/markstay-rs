@@ -20,7 +20,8 @@ use markstay::{
     lint_diff, lint_document, matching_blocks, mint_id, normalize_body, parse_document,
     preserve_wrap, quote_ratio, ratio, repair_duplicates, resolve, restamp, sort_findings, stamp,
     Block, CommitEntry, Finding, Marker, RestampOptions, Selector, StampOptions, Syntax,
-    DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH, PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY,
+    DEFAULT_ALPHABET, DEFAULT_HASH_LENGTH, DEFAULT_MARGIN, DEFAULT_THRESHOLD, PRESERVE_INSTRUCTION,
+    PRESERVE_RETURN_ONLY,
 };
 
 const TOL: f64 = 1e-9;
@@ -113,7 +114,7 @@ fn strings(v: &Value) -> Vec<String> {
 /// match arms below (an arm without an entry here is an unenforced verifier).
 const VERIFIED_CATEGORIES: &[&str] = &[
     "hash", "markers", "parse", "lint", "diff", "seqmatch", "score", "resolve", "stamp", "mint",
-    "preserve", "check",
+    "preserve", "check", "anchors",
 ];
 
 fn verify(category: &str, v: &Value) -> (Value, Value) {
@@ -174,12 +175,19 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
         "score" => verify_score(v),
         "resolve" => {
             let anchors = build_anchors(str_field(v, "before"));
-            let res = resolve(
-                &anchors,
-                str_field(v, "after"),
-                v["threshold"].as_f64().expect("threshold"),
-                v["margin"].as_f64().expect("margin"),
-            );
+            // A vector that OMITS threshold/margin asserts SPEC.md §9's defaults,
+            // so the crate's own exported constants are what must reproduce it,
+            // and each field defaults independently. A field that is PRESENT is
+            // used as given: a null is an error, not a second spelling of absent.
+            let threshold = match v.get("threshold") {
+                None => DEFAULT_THRESHOLD,
+                Some(t) => t.as_f64().expect("threshold"),
+            };
+            let margin = match v.get("margin") {
+                None => DEFAULT_MARGIN,
+                Some(m) => m.as_f64().expect("margin"),
+            };
+            let res = resolve(&anchors, str_field(v, "after"), threshold, margin);
             let mut got = Map::new();
             for r in &res {
                 got.insert(
@@ -188,6 +196,27 @@ fn verify(category: &str, v: &Value) -> (Value, Value) {
                 );
             }
             (Value::Object(got), v["resolutions"].clone())
+        }
+        // What `build_anchors` STORES (SPEC.md §9), as opposed to what `resolve`
+        // decides. Resolution cannot see this: an implementation storing whole
+        // neighbour blocks and one storing the 48-character window resolve
+        // identically, because both window at match time.
+        "anchors" => {
+            let got = Value::Array(
+                build_anchors(str_field(v, "document"))
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "id": a.id,
+                            "hash": a.hash,
+                            "quote": a.selector.quote,
+                            "prefix": a.selector.prefix,
+                            "suffix": a.selector.suffix,
+                        })
+                    })
+                    .collect(),
+            );
+            (got, v["anchors"].clone())
         }
         "stamp" => verify_stamp(v),
         "mint" => verify_mint(v),

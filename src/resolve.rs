@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::hash::body_hash;
 use crate::parse::{parse_document, Block};
-use crate::quote::{best_match, Selector};
+use crate::quote::{best_match, window_prefix, window_suffix, Selector};
 
 /// Default thresholds for the QUOTE tier (SPEC.md §9 commit rule). A recovery is
 /// committed only when the best candidate clears `threshold` AND beats the
@@ -52,7 +52,14 @@ pub fn build_anchors_from_blocks(blocks: &[Block]) -> Vec<Anchor> {
         let b = &blocks[i];
         let prev = if i > 0 { blocks[i - 1].content.clone() } else { String::new() };
         let next = if i + 1 < blocks.len() { blocks[i + 1].content.clone() } else { String::new() };
-        let selector = Selector { quote: b.content.clone(), prefix: prev, suffix: next };
+        // SPEC.md §9: the stored prefix/suffix carry up to 48 characters of the
+        // neighbour on each side. Storing whole blocks caps the achievable ratio
+        // near 2*48/(len+48), because the candidate side is windowed at match time.
+        let selector = Selector {
+            quote: b.content.clone(),
+            prefix: window_prefix(&prev),
+            suffix: window_suffix(&next),
+        };
         for mk in &b.markers {
             if mk.malformed {
                 continue;

@@ -55,6 +55,19 @@ fn cp_take_start(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// The last `CONTEXT_CHARS` code points of a preceding neighbour (SPEC.md §9:
+/// prefix/suffix "carry up to 48 characters of the neighbour on each side").
+/// Applied to raw text before normalization, on both sides of the comparison, so
+/// whitespace collapse cannot change how much text survives on one side only.
+pub fn window_prefix(text: &str) -> String {
+    cp_take_end(text, CONTEXT_CHARS)
+}
+
+/// The first `CONTEXT_CHARS` code points of a following neighbour.
+pub fn window_suffix(text: &str) -> String {
+    cp_take_start(text, CONTEXT_CHARS)
+}
+
 /// Last `n` code points of `s` (Python `s[-n:]`).
 fn cp_take_end(s: &str, n: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -100,13 +113,17 @@ pub fn body_score(sel: &Selector, candidate: &str) -> f64 {
 /// stored prefix/suffix. Used only to break near-ties; not a primary key.
 pub fn context_bonus(sel: &Selector, prev_text: &str, next_text: &str) -> f64 {
     let mut bonus = 0.0;
+    // Both sides are windowed. On a selector this version built the stored side
+    // is already within the limit, so windowing it is a no-op; it matters for a
+    // selector built by a pre-v1.2 tool or assembled by a consumer, which would
+    // otherwise lose bonus purely to the asymmetry.
     if !sel.prefix.is_empty() {
-        let prev_ctx = cp_take_end(prev_text, CONTEXT_CHARS);
-        bonus += 0.05 * quote_ratio(&normalize(&sel.prefix), &normalize(&prev_ctx));
+        let prev_ctx = window_prefix(prev_text);
+        bonus += 0.05 * quote_ratio(&normalize(&window_prefix(&sel.prefix)), &normalize(&prev_ctx));
     }
     if !sel.suffix.is_empty() {
-        let next_ctx = cp_take_start(next_text, CONTEXT_CHARS);
-        bonus += 0.05 * quote_ratio(&normalize(&sel.suffix), &normalize(&next_ctx));
+        let next_ctx = window_suffix(next_text);
+        bonus += 0.05 * quote_ratio(&normalize(&window_suffix(&sel.suffix)), &normalize(&next_ctx));
     }
     bonus
 }
