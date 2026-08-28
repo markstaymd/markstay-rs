@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.2-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.4-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.2), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.4), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -25,6 +25,13 @@ dynamic and GC'd). The §9 algorithm is pinned language-neutrally (Ratcliff/Ober
 over code points), so the Rust core dropped in against the corpus **without forcing
 a spec edit**, which is the strongest available evidence that the standard is
 unambiguous rather than defined by one implementation's quirks.
+
+**Child-block identity (§5.5) is not implemented here.** Version 1.3 lets a direct list
+item carry its own stay under the reserved `subhash` key, and §16 makes segmenting and
+resolving those **optional**. What §16 makes mandatory for every tool is the write-path
+shim, which this package honours: a `subhash` marker is preserved verbatim, never given
+a container hash, and never counted as its block's stay. The Python reference implements
+the section itself.
 
 ## Install
 

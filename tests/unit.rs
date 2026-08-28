@@ -488,6 +488,43 @@ fn restamp_add_missing_gives_a_hashless_marker_a_hash() {
     assert_eq!(mk.hash.as_deref(), Some(body_hash("Body text.", Some(12)).as_str()));
 }
 
+#[test]
+fn restamp_add_missing_leaves_a_subhash_marker_alone() {
+    // SPEC.md §5.5: a child marker addresses the list item, so the list's digest
+    // must not be written in beside it. This build has no child support at all,
+    // which is exactly the tool the rule is aimed at.
+    let md = "- Alpha <!-- stay:k1 subhash=sha256:8655 -->\n- Beta\n";
+    let res = restamp(md, &RestampOptions { add_missing: true, ..Default::default() });
+    assert_eq!(res.text, md);
+    assert!(res.refreshed.is_empty());
+}
+
+#[test]
+fn stamp_subhash_marker_does_not_make_its_block_stamped() {
+    // SPEC.md §16, the other half of the write-path shim: a tool with no child
+    // support must not read child markers as evidence the list is done, or the
+    // container never gets a stay and every child resolves on tier-4 evidence.
+    let md = "- Ship the linter <!-- stay:c1 subhash=sha256:9d2f -->\n\
+              - Ship the hook <!-- stay:c2 subhash=sha256:41ac -->\n";
+    let res = stamp(md, &StampOptions::default(), || "cont1".to_string());
+    assert_eq!(res.minted.len(), 1);
+    assert_eq!(res.minted[0].id, "cont1");
+    assert!(res.text.contains("<!-- stay:cont1 hash=sha256:"));
+    assert!(res.text.contains("stay:c1 subhash=sha256:9d2f"));
+    assert!(res.text.contains("stay:c2 subhash=sha256:41ac"));
+}
+
+#[test]
+fn stamp_custom_key_ending_in_subhash_is_not_the_reserved_key() {
+    // SPEC.md §4: the boundary is whitespace, not a word boundary. A hyphen is not a
+    // word byte, so a word boundary would read `x-subhash` as the reserved key and
+    // mint a second stay onto a block that already has one.
+    let md = "A paragraph.\n<!-- stay:x1 x-subhash=sha256:abcd -->\n";
+    let res = stamp(md, &StampOptions::default(), || "spurious".to_string());
+    assert!(res.minted.is_empty());
+    assert_eq!(res.text, md);
+}
+
 // --- repair_duplicates (§7) ---
 
 #[test]

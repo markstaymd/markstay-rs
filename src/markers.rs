@@ -62,13 +62,6 @@ pub(crate) fn is_ws_byte(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)
 }
 
-/// `\w` byte (`[A-Za-z0-9_]`): the predicate behind the `\b` word boundary that the
-/// read and write hash scanners both require before the `hash` attribute key.
-#[inline]
-pub(crate) fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
 #[inline]
 fn is_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
@@ -199,22 +192,28 @@ pub(crate) fn find_stay_span(s: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Byte span of the first well-formed `\bhash\s*=\s*sha256:<hex>` run in `s`, as
+/// Byte span of the first well-formed `hash=sha256:<hex>` attribute in `s`, as
 /// `(key_start, hex_start, hex_end)`: `key_start` is the `h` of `hash`, and
-/// `hex_start..hex_end` is the hex value as written (mixed case). `\b` is
-/// enforced (the byte before `hash` is non-word or the string start), so a
-/// `hash` embedded in a longer §4 key such as `rehash` is skipped. Canonical
-/// home of the HASH grammar: the read path (`parse_hash`) lowercases
-/// `hex_start..hex_end`; the write path (`replace_first_hash` in stamp.rs)
-/// splices over `key_start..hex_end`. Both enforce the same `\b`, so they share
-/// this with no boundary parameter.
+/// `hex_start..hex_end` is the hex value as written (mixed case).
+///
+/// The boundary is **whitespace** (the byte before `hash` is ASCII whitespace, or
+/// the string start), which is the boundary SPEC.md §4's attribute grammar actually
+/// has: an attribute is a whitespace-separated token. So a `hash` embedded in a
+/// longer custom key is skipped whether it is written `rehash` or `x-hash`, and a
+/// word boundary is not enough, since a hyphen is not a word byte and the write path
+/// would splice over a §4 key it is required to preserve.
+///
+/// Canonical home of the HASH grammar: the read path (`parse_hash`) lowercases
+/// `hex_start..hex_end`; the write path (`replace_first_hash` in stamp.rs) splices
+/// over `key_start..hex_end`. Both get the same boundary from here.
 pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
     let bytes = s.as_bytes();
     let mut from = 0usize;
     while let Some(rel) = find_sub(&bytes[from..], b"hash") {
         let at = from + rel;
-        // \b before `hash`: previous byte must be non-word (or the string start).
-        if at != 0 && is_word_byte(bytes[at - 1]) {
+        // Attribute boundary: the previous byte is whitespace, or `hash` starts the
+        // string. See the doc comment for why a word boundary is the wrong test.
+        if at != 0 && !is_ws_byte(bytes[at - 1]) {
             from = at + 1;
             continue;
         }
@@ -244,7 +243,7 @@ pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
 }
 
 /// Parse the block hash from a marker body
-/// (`\bhash\s*=\s*sha256:([0-9a-fA-F]+)`), returned lowercase. First match wins.
+/// (`hash=sha256:<hex>`, whitespace-bounded), returned lowercase. First match wins.
 fn parse_hash(body: &str) -> Option<String> {
     let (_, hex_start, hex_end) = find_hash_hex_span(body)?;
     Some(body[hex_start..hex_end].to_ascii_lowercase())

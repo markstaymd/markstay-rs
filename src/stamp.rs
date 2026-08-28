@@ -254,7 +254,13 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     let mut current: Option<usize> = None;
     for (start, chunk) in segment_blank_line(&blank_frontmatter(&norm)) {
         let content = ascii_trim(&strip_markers(&chunk)).to_string();
-        let has_id = find_markers(&chunk, 0).iter().any(|mk| mk.id.is_some() && !mk.malformed);
+        // SPEC.md §16: a marker carrying `subhash` addresses a list item, so it never
+        // makes the block around it stamped. Unconditional, like the guard in
+        // `restamp`: a tool that cannot see children still has to leave the container
+        // stampable, or a child-stamped list never gets a stay of its own.
+        let has_id = find_markers(&chunk, 0)
+            .iter()
+            .any(|mk| mk.id.is_some() && !mk.malformed && !carries_subhash(&mk.raw));
         if !content.is_empty() {
             let n_lines = chunk.split('\n').count();
             // `start` is the chunk's 1-based first line (segment_blank_line), and the
@@ -343,6 +349,12 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
             refreshed.push(id.clone());
             Some(replace_first_hash(&mk.raw, &now))
         } else if opts.add_missing {
+            // SPEC.md §5.5: a marker carrying `subhash` addresses a list item,
+            // never the block around it, so the block's digest must not be added
+            // beside it.
+            if carries_subhash(&mk.raw) {
+                return None;
+            }
             let now = body_hash(content, Some(opts.hash_length.unwrap_or(DEFAULT_HASH_LENGTH)));
             refreshed.push(id.clone());
             Some(insert_hash_after_stay(&mk.raw, &now))
@@ -413,9 +425,9 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
 // helpers run over a marker's raw text. The Rust core has no regex, so each walks
 // the bytes using the shared scanner primitives from markers.rs.
 
-/// Replace the first `\bhash\s*=\s*sha256:<hex>` run in `raw` with
-/// `hash=sha256:{now}` (mirrors `re.sub(..., count=1)`). The `\b` skip of a
-/// `hash` inside a longer §4 key (e.g. `rehash`) lives in the shared
+/// Replace the first `hash=sha256:<hex>` attribute in `raw` with
+/// `hash=sha256:{now}` (mirrors `re.sub(..., count=1)`). The skip of a `hash` inside
+/// a longer §4 custom key (`rehash`, `x-hash`) lives in the shared
 /// `find_hash_hex_span`, so this and the read path cannot drift.
 fn replace_first_hash(raw: &str, now: &str) -> String {
     match find_hash_hex_span(raw) {
@@ -429,6 +441,46 @@ fn replace_first_hash(raw: &str, now: &str) -> String {
         }
         None => raw.to_string(),
     }
+}
+
+/// True when `raw` carries the reserved `subhash` attribute (SPEC.md §4, §5.5).
+///
+/// The boundary is whitespace, not a word boundary. An attribute is a
+/// whitespace-separated token, and a word boundary accepts a custom key merely
+/// ENDING in the reserved one, because a hyphen is not a word byte:
+/// `x-subhash=sha256:ab` would read as `subhash` and this tool would act on an
+/// attribute §4 tells it to preserve and ignore. Nothing conforming loses by the
+/// tighter rule, since every attribute follows whitespace.
+///
+/// Written out rather than reusing `find_hash_hex_span`, which looks for a different
+/// key literal and so deliberately cannot see this one. Both apply the same boundary.
+fn carries_subhash(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = crate::markers::find_sub(&bytes[from..], b"subhash") {
+        let at = from + rel;
+        if at != 0 && !crate::markers::is_ws_byte(bytes[at - 1]) {
+            from = at + 1;
+            continue;
+        }
+        let mut j = at + 7;
+        while j < bytes.len() && crate::markers::is_ws_byte(bytes[j]) {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'=' {
+            j += 1;
+            while j < bytes.len() && crate::markers::is_ws_byte(bytes[j]) {
+                j += 1;
+            }
+            if bytes[j..].starts_with(b"sha256:")
+                && bytes.get(j + 7).is_some_and(u8::is_ascii_hexdigit)
+            {
+                return true;
+            }
+        }
+        from = at + 1;
+    }
+    false
 }
 
 /// Insert ` hash=sha256:{now}` immediately after the first `stay:<id>` token.
