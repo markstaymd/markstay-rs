@@ -4,8 +4,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::code::{code_lines, strip_markers_outside_code};
 use crate::hash::normalize_newlines;
-use crate::markers::{find_markers, strip_markers, Marker};
+use crate::markers::{find_markers, Marker};
 use crate::segment::{blank_frontmatter, segment_blank_line};
 use crate::text::ascii_trim;
 
@@ -32,14 +33,24 @@ pub struct Block {
 /// a parameter here so an unknown mode is unrepresentable (rather than a runtime
 /// error, as in the JS/Python `mode=` string surface).
 pub fn parse_document(md: &str) -> Vec<Block> {
-    let text = normalize_newlines(md);
-    let chunks = segment_blank_line(&blank_frontmatter(&text));
+    let text = blank_frontmatter(&normalize_newlines(md)).into_owned();
+    // SPEC.md §3.3: text inside a fenced code block is content. The rule is
+    // computed once over the whole document and threaded, on the
+    // `blank_frontmatter` precedent, because neither segmenter has a concept of a
+    // fence and `find_markers` is handed chunks. Blanking preserves line numbers,
+    // so this mask indexes the caller's text too.
+    let code = code_lines(&text);
+    let chunks = segment_blank_line(&text);
 
     let mut blocks: Vec<Block> = Vec::new();
     let mut cidx: i64 = 0;
     for (start, chunk) in chunks {
-        let markers = find_markers(&chunk, start - 1);
-        let stripped = strip_markers(&chunk);
+        // §3.3: a marker-shaped string in a fence is content, not a marker.
+        let markers: Vec<Marker> = find_markers(&chunk, start - 1)
+            .into_iter()
+            .filter(|mk| !code.contains(&mk.line))
+            .collect();
+        let stripped = strip_markers_outside_code(&chunk, &code, start - 1);
         let content = ascii_trim(&stripped).to_string();
         if content.is_empty() {
             // marker-only chunk: attach to the previous content block if any

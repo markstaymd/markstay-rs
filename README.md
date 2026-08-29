@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.4-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.5-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.4), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.5), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -207,8 +207,8 @@ old.md -> new.md:
 
 `tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
 gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **332/332 corpus vectors pass** (102 hand-authored `spec/` + 230
-generated `gen/`, 20 files), incl. every `seqmatch` vector (143, with non-BMP) to
+identical key sets. **408/408 corpus vectors pass** (168 hand-authored `spec/` + 240
+generated `gen/`, 22 files), incl. every `seqmatch` vector (143, with non-BMP) to
 delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python. The
 `check` category carries 13 commit-shaped inputs and asserts baseline pairings,
 findings, moves, Markdown tracking departures, deletion notes, and scope. The

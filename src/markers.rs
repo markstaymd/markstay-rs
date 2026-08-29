@@ -22,6 +22,7 @@
 // byte never occurs inside a multibyte sequence (so a byte search for `-->` etc.
 // cannot false-match mid-character).
 
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -95,10 +96,10 @@ pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// One raw marker match: byte offset of the open delimiter, the full match text,
 /// and the trimmed group body (starting with `stay:`).
-struct RawMatch {
-    start: usize,
-    raw: String,
-    body: String,
+pub(crate) struct RawMatch {
+    pub(crate) start: usize,
+    pub(crate) raw: String,
+    pub(crate) body: String,
 }
 
 /// Scan `text` for every `open ... close` marker (matching the regex semantics
@@ -137,6 +138,47 @@ fn scan(text: &str, open: &[u8], close: &[u8]) -> Vec<RawMatch> {
                 pos = q + close.len();
             }
         }
+    }
+    out
+}
+
+/// Every marker in `text`, both syntaxes, in one left-to-right pass in document
+/// order (with its [`Syntax`]).
+///
+/// The JS reference uses a single combined `HTML|MDX` regex, so matching consumes
+/// each match: a marker delimiter inside an already-matched marker is never a
+/// separate match. This reproduces that by merging the two per-syntax scans and
+/// only ever taking the next match at or after the previous match's end (HTML wins
+/// a start-position tie, which the distinct open delimiters make impossible in
+/// practice). Every caller that must see markers *in order* (rewriting them,
+/// masking them against §3.3) shares this one merge rather than re-deriving it.
+pub(crate) fn scan_all(text: &str) -> Vec<(RawMatch, Syntax)> {
+    let html = scan(text, b"<!--", b"-->");
+    let mdx = scan(text, b"{/*", b"*/}");
+    let mut hi = 0usize;
+    let mut mi = 0usize;
+    let mut cursor = 0usize;
+    let mut out: Vec<(RawMatch, Syntax)> = Vec::with_capacity(html.len() + mdx.len());
+    loop {
+        while hi < html.len() && html[hi].start < cursor {
+            hi += 1;
+        }
+        while mi < mdx.len() && mdx[mi].start < cursor {
+            mi += 1;
+        }
+        let use_html = match (html.get(hi).map(|m| m.start), mdx.get(mi).map(|m| m.start)) {
+            (None, None) => break,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(hs), Some(ms)) => hs <= ms,
+        };
+        let (chosen, syntax) =
+            if use_html { (&html[hi], Syntax::Html) } else { (&mdx[mi], Syntax::Mdx) };
+        cursor = chosen.start + chosen.raw.len();
+        out.push((
+            RawMatch { start: chosen.start, raw: chosen.raw.clone(), body: chosen.body.clone() },
+            syntax,
+        ));
     }
     out
 }
@@ -305,56 +347,40 @@ fn remove_matches(text: &str, open: &[u8], close: &[u8]) -> String {
 /// helpers (restamp, repair_duplicates) build on this so marker edits reuse the
 /// one canonical grammar instead of re-deriving it.
 ///
-/// The JS reference uses a single combined `HTML|MDX` regex, so matching is one
-/// left-to-right pass that consumes each match (a marker delimiter inside an
-/// already-matched marker is never a separate match). This reproduces that by
-/// merging the two per-syntax scans and only ever taking the next match at or
-/// after the previous match's end (HTML wins a start-position tie, which the
-/// distinct open delimiters make impossible in practice).
-pub fn rewrite_markers<F>(text: &str, mut transform: F) -> String
+/// `code` is the SPEC.md §3.3 mask for `text` (1-based line numbers inside a
+/// fenced code block). Matches opening on one of those lines are left
+/// byte-for-byte alone: they are an example, not a marker, and rewriting one is
+/// how a restamp overwrites a document's illustrative `hash=` values.
+pub fn rewrite_markers<F>(text: &str, mut transform: F, code: Option<&BTreeSet<usize>>) -> String
 where
     F: FnMut(&Marker) -> Option<String>,
 {
-    let html = scan(text, b"<!--", b"-->");
-    let mdx = scan(text, b"{/*", b"*/}");
-    let mut hi = 0usize;
-    let mut mi = 0usize;
-    let mut cursor = 0usize;
+    let bytes = text.as_bytes();
+    let masked = code.is_some_and(|c| !c.is_empty());
     let mut last = 0usize;
     let mut out = String::with_capacity(text.len());
-    loop {
-        while hi < html.len() && html[hi].start < cursor {
-            hi += 1;
+    for (m, syntax) in scan_all(text) {
+        if masked {
+            let nl = bytes[..m.start].iter().filter(|&&b| b == b'\n').count();
+            if code.unwrap().contains(&(nl + 1)) {
+                continue;
+            }
         }
-        while mi < mdx.len() && mdx[mi].start < cursor {
-            mi += 1;
-        }
-        let use_html = match (html.get(hi).map(|m| m.start), mdx.get(mi).map(|m| m.start)) {
-            (None, None) => break,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (Some(hs), Some(ms)) => hs <= ms,
-        };
-        let (chosen, syntax) =
-            if use_html { (&html[hi], Syntax::Html) } else { (&mdx[mi], Syntax::Mdx) };
-        let start = chosen.start;
-        let end = start + chosen.raw.len();
-        let id = parse_id(&chosen.body);
+        let id = parse_id(&m.body);
         let marker = Marker {
             id: id.clone(),
-            hash: parse_hash(&chosen.body),
-            raw: chosen.raw.clone(),
+            hash: parse_hash(&m.body),
+            raw: m.raw.clone(),
             syntax,
             line: 0,
             malformed: id.is_none(),
         };
-        out.push_str(&text[last..start]);
+        out.push_str(&text[last..m.start]);
         match transform(&marker) {
             Some(repl) => out.push_str(&repl),
             None => out.push_str(&marker.raw),
         }
-        last = end;
-        cursor = end;
+        last = m.start + m.raw.len();
     }
     out.push_str(&text[last..]);
     out

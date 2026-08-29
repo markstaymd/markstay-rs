@@ -15,11 +15,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::code::{code_lines, fence_state, strip_markers_outside_code};
 use crate::hash::{body_hash, normalize_newlines};
 use crate::id::is_id_charset;
 use crate::markers::{
-    find_hash_hex_span, find_markers, find_stay_span, is_id_byte, rewrite_markers, strip_markers,
-    Marker, Syntax,
+    find_hash_hex_span, find_markers, find_stay_span, is_id_byte, rewrite_markers, Marker, Syntax,
 };
 use crate::parse::parse_document;
 use crate::segment::{blank_frontmatter, segment_blank_line};
@@ -222,6 +222,9 @@ struct PendingBlock {
     last_line0: usize,
     content: String,
     has_id: bool,
+    /// SPEC.md §3.3 writer rule: this block's span lies inside a listing, or a
+    /// marker written after it would.
+    in_fence: bool,
 }
 
 /// Stamp every unmarked content block (SPEC.md §5/§6): for each block with no
@@ -233,8 +236,18 @@ struct PendingBlock {
 /// Returns [`StampResult`] with LF-normalized `text` and `minted` `[{id, line}]`.
 pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) -> StampResult {
     let norm = normalize_newlines(md);
+    let blanked = blank_frontmatter(&norm).into_owned();
+    // SPEC.md §3.3, computed on the blanked text so it agrees line-for-line with
+    // what `parse_document` sees. `open_after` is the writer's half of the rule: a
+    // marker appended after a line a fence is still open on lands *inside the
+    // listing*, which is how this project's own §4 grammar block acquired a real
+    // marker in the middle of its ABNF.
+    let fences = fence_state(&blanked);
+    let code = &fences.inside;
 
-    // Existing ids across the whole document, so a minted id can't collide.
+    // Existing ids across the whole document, so a minted id can't collide. The raw
+    // scan is deliberate: an id shown in a fenced example is not an id, but minting
+    // the same token beside it would read as one to every human.
     let mut used: BTreeSet<String> = BTreeSet::new();
     for mk in find_markers(&norm, 0) {
         if !mk.malformed {
@@ -252,21 +265,44 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     // Blanking is line-for-line, so the insertion points below still index `norm`.
     let mut needs_stamp: Vec<PendingBlock> = Vec::new();
     let mut current: Option<usize> = None;
-    for (start, chunk) in segment_blank_line(&blank_frontmatter(&norm)) {
-        let content = ascii_trim(&strip_markers(&chunk)).to_string();
+    for (start, chunk) in segment_blank_line(&blanked) {
+        let stripped = strip_markers_outside_code(&chunk, code, start - 1);
+        let content = ascii_trim(&stripped).to_string();
         // SPEC.md §16: a marker carrying `subhash` addresses a list item, so it never
         // makes the block around it stamped. Unconditional, like the guard in
         // `restamp`: a tool that cannot see children still has to leave the container
         // stampable, or a child-stamped list never gets a stay of its own.
-        let has_id = find_markers(&chunk, 0)
-            .iter()
-            .any(|mk| mk.id.is_some() && !mk.malformed && !carries_subhash(&mk.raw));
+        let has_id = find_markers(&chunk, start - 1).iter().any(|mk| {
+            mk.id.is_some()
+                && !mk.malformed
+                && !carries_subhash(&mk.raw)
+                // §3.3: an example never stamps its block.
+                && !code.contains(&mk.line)
+        });
         if !content.is_empty() {
             let n_lines = chunk.split('\n').count();
             // `start` is the chunk's 1-based first line (segment_blank_line), and the
             // chunk holds only its non-blank lines, so its 0-based last line is
             // (start - 1) + (n_lines - 1) = start + n_lines - 2.
-            needs_stamp.push(PendingBlock { last_line0: start + n_lines - 2, content, has_id });
+            // §3.3 writer rule, in the two halves it actually has. A block is
+            // refused when a fence was already open *before* its first line (its
+            // span lies inside a listing), or when one is still open after its last
+            // (the marker would be written into the listing). Both are needed and
+            // neither implies the other: the baseline segmenter splits a blank-line
+            // fence into halves, and the second half starts inside the fence while
+            // ending on the closing line, where an insertion-point test alone would
+            // happily stamp half a listing. "Before its first line" rather than "its
+            // first line is code" is what keeps a complete fence stampable under
+            // §5.2, where the block *is* the fence and takes its stay after the
+            // closing line in the ordinary way.
+            let in_fence = fences.open_after.contains(&(start - 1))
+                || fences.open_after.contains(&(start + n_lines - 1));
+            needs_stamp.push(PendingBlock {
+                last_line0: start + n_lines - 2,
+                content,
+                has_id,
+                in_fence,
+            });
             current = Some(needs_stamp.len() - 1);
         } else if let Some(idx) = current {
             // marker-only chunk: its id (if any) identifies the preceding block
@@ -279,7 +315,7 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     let mut insert_after: BTreeMap<usize, String> = BTreeMap::new();
     let mut minted: Vec<Minted> = Vec::new();
     for blk in &needs_stamp {
-        if blk.has_id {
+        if blk.has_id || blk.in_fence {
             continue;
         }
         let id = mint_unique(&mut used, &mut new_id);
@@ -337,31 +373,39 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
     }
 
     let mut refreshed: Vec<String> = Vec::new();
-    let text = rewrite_markers(&norm, |mk: &Marker| {
-        let id = mk.id.as_ref()?;
-        let content = content_by_id.get(id)?;
-        if let Some(stored) = &mk.hash {
-            let len = opts.hash_length.unwrap_or(stored.len());
-            let now = body_hash(content, Some(len));
-            if &now == stored {
-                return None; // unchanged at this precision
+    // §3.3: an illustrative marker in a fence is not this document's marker, and
+    // rewriting its `hash=` to the digest of the fence around it is the defect that
+    // opened the rule.
+    let code = code_lines(&blank_frontmatter(&norm));
+    let text = rewrite_markers(
+        &norm,
+        |mk: &Marker| {
+            let id = mk.id.as_ref()?;
+            let content = content_by_id.get(id)?;
+            if let Some(stored) = &mk.hash {
+                let len = opts.hash_length.unwrap_or(stored.len());
+                let now = body_hash(content, Some(len));
+                if &now == stored {
+                    return None; // unchanged at this precision
+                }
+                refreshed.push(id.clone());
+                Some(replace_first_hash(&mk.raw, &now))
+            } else if opts.add_missing {
+                // SPEC.md §5.5: a marker carrying `subhash` addresses a list item,
+                // never the block around it, so the block's digest must not be added
+                // beside it.
+                if carries_subhash(&mk.raw) {
+                    return None;
+                }
+                let now = body_hash(content, Some(opts.hash_length.unwrap_or(DEFAULT_HASH_LENGTH)));
+                refreshed.push(id.clone());
+                Some(insert_hash_after_stay(&mk.raw, &now))
+            } else {
+                None
             }
-            refreshed.push(id.clone());
-            Some(replace_first_hash(&mk.raw, &now))
-        } else if opts.add_missing {
-            // SPEC.md §5.5: a marker carrying `subhash` addresses a list item,
-            // never the block around it, so the block's digest must not be added
-            // beside it.
-            if carries_subhash(&mk.raw) {
-                return None;
-            }
-            let now = body_hash(content, Some(opts.hash_length.unwrap_or(DEFAULT_HASH_LENGTH)));
-            refreshed.push(id.clone());
-            Some(insert_hash_after_stay(&mk.raw, &now))
-        } else {
-            None
-        }
-    });
+        },
+        Some(&code),
+    );
     RestampResult { text, refreshed }
 }
 
@@ -402,20 +446,27 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
 
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut renamed: Vec<Renamed> = Vec::new();
-    let text = rewrite_markers(&norm, |mk: &Marker| {
-        let id = mk.id.as_ref()?;
-        if !dup.contains(id) {
-            return None;
-        }
-        let c = seen.entry(id.clone()).or_insert(0);
-        *c += 1;
-        if *c == 1 {
-            return None; // first occurrence keeps the id
-        }
-        let fresh = mint_unique(&mut used, &mut new_id);
-        renamed.push(Renamed { from: id.clone(), to: fresh.clone() });
-        Some(replace_stay_id(&mk.raw, &fresh))
-    });
+    // §3.3: an id shown in a fenced example is an example, not a second use of
+    // that id, so it is never renamed.
+    let code = code_lines(&blank_frontmatter(&norm));
+    let text = rewrite_markers(
+        &norm,
+        |mk: &Marker| {
+            let id = mk.id.as_ref()?;
+            if !dup.contains(id) {
+                return None;
+            }
+            let c = seen.entry(id.clone()).or_insert(0);
+            *c += 1;
+            if *c == 1 {
+                return None; // first occurrence keeps the id
+            }
+            let fresh = mint_unique(&mut used, &mut new_id);
+            renamed.push(Renamed { from: id.clone(), to: fresh.clone() });
+            Some(replace_stay_id(&mk.raw, &fresh))
+        },
+        Some(&code),
+    );
     RepairResult { text, renamed }
 }
 
