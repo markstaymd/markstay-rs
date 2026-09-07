@@ -1,4 +1,4 @@
-//! markstay Rust reference implementation, public API (SPEC.md v1.5, parser-free
+//! markstay Rust reference implementation, public API (SPEC.md v1.6, parser-free
 //! core). Mirrors the JS reference surface (impl/js/src/index.js) and the Python
 //! reference (linter/markstay_lint.py and eval/attachment/{quote,resolver}.py).
 //!

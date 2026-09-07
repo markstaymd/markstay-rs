@@ -15,9 +15,10 @@
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::hash::normalize_newlines;
-use crate::markers::{scan_all, strip_markers};
+use crate::markers::{scan_marker_records, strip_markers};
 
 /// Fence geometry for one document (SPEC.md §3.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,16 +139,24 @@ pub fn strip_markers_outside_code(
     if code.is_empty() {
         return strip_markers(text);
     }
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0usize;
-    for (m, _syntax) in scan_all(text) {
-        let nl = bytes[..m.start].iter().filter(|&&b| b == b'\n').count();
-        if code.contains(&(line_offset + nl + 1)) {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for record in scan_marker_records(text, line_offset) {
+        if record.marker.malformed || code.contains(&record.marker.line) {
             continue;
         }
-        out.push_str(&text[last..m.start]);
-        last = m.start + m.raw.len();
+        if let Some(previous) = ranges.last_mut() {
+            if record.start < previous.1 {
+                previous.1 = previous.1.max(record.end);
+                continue;
+            }
+        }
+        ranges.push((record.start, record.end));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    for (start, end) in ranges {
+        out.push_str(&text[last..start]);
+        last = end;
     }
     out.push_str(&text[last..]);
     out

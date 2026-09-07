@@ -7,8 +7,8 @@
 // CommonMark-mode cases (SPEC.md §5.2) are deferred from the parser-free core.
 
 use markstay::{
-    best_match, body_hash, build_anchors, has_errors, lint_diff, lint_document, parse_document,
-    resolve, Finding, Selector, DEFAULT_MARGIN, DEFAULT_THRESHOLD,
+    best_match, body_hash, build_anchors, check_entries, has_errors, lint_diff, lint_document,
+    parse_document, resolve, CommitEntry, Finding, Selector, DEFAULT_MARGIN, DEFAULT_THRESHOLD,
 };
 
 fn codes_sorted(findings: &[Finding]) -> Vec<&'static str> {
@@ -100,10 +100,40 @@ fn orphan_marker_at_top_is_reported() {
 }
 
 #[test]
+fn orphan_attribution_precedes_subhash_exclusion_and_hash_drift() {
+    for marker in [
+        "<!-- stay:digest subhash=sha256:dead hash=sha256:dead -->",
+        "<!-- stay:bare subhash=bogus hash=sha256:dead -->",
+        "<!-- stay:quoted subhash=\"sha256:dead\" hash=sha256:dead -->",
+        "<!-- stay:extension x-subhash=bogus hash=sha256:dead -->",
+    ] {
+        let md = format!("{marker}\n\nReal content below.\n");
+        let (_, findings) = lint_document(&md);
+        assert_eq!(codes_sorted(&findings), ["ORPHAN_MARKER"], "{marker}");
+        assert!(!findings.iter().any(|f| f.code == "HASH_DRIFT"), "{marker}");
+    }
+}
+
+#[test]
 fn hash_drift_is_a_warning_not_an_error() {
     let (_, findings) = lint_document("Edited content.\n<!-- stay:z9 hash=sha256:dead -->\n");
     assert_eq!(codes_sorted(&findings), ["HASH_DRIFT"]);
     assert!(!has_errors(&findings));
+}
+
+#[test]
+fn subhash_markers_stay_lexical_for_duplicates_but_never_bind_to_containers() {
+    let md = "<!-- stay:child subhash=bogus hash=sha256:dead -->\n\n\
+              Body.\n<!-- stay:child subhash=bogus hash=sha256:dead -->\n";
+    let (_, findings) = lint_document(md);
+    assert_eq!(codes_sorted(&findings), ["DUPLICATE_ID", "ORPHAN_MARKER"]);
+}
+
+#[test]
+fn x_subhash_is_an_ordinary_block_attribute() {
+    let (_, findings) =
+        lint_document("Body.\n<!-- stay:block x-subhash=sha256:abcd hash=sha256:dead -->\n");
+    assert_eq!(codes_sorted(&findings), ["HASH_DRIFT"]);
 }
 
 #[test]
@@ -158,6 +188,12 @@ fn diff_treats_an_in_place_edit_as_drift_not_relocation() {
     assert_eq!(codes_sorted(&lint_diff(before, after)), ["HASH_DRIFT"]);
 }
 
+#[test]
+fn diff_ignores_child_ids_as_container_identity() {
+    let before = "Body.\n<!-- stay:child subhash=bogus -->\n";
+    assert!(lint_diff(before, "Body.\n").is_empty());
+}
+
 // --- resolver ladder (ported / adapted from test_attach.py) -----------------
 
 const REORDER_BEFORE: &str = "The order pipeline ingests and normalizes partner messages.\n\
@@ -176,6 +212,49 @@ fn marker_tier_kept_markers_resolve_by_marker() {
     let res = resolve(&build_anchors(REORDER_BEFORE), after, DEFAULT_THRESHOLD, DEFAULT_MARGIN);
     assert_eq!(find(&res, "ing").method, "marker");
     assert_eq!(find(&res, "dlq").method, "marker");
+}
+
+#[test]
+fn anchors_and_marker_lookup_exclude_exact_key_subhash_markers() {
+    let before = "Body.\n\
+                  <!-- stay:child subhash=bogus -->\n\
+                  <!-- stay:custom x-subhash=bogus -->\n\
+                  <!-- stay:parent -->\n";
+    assert_eq!(
+        build_anchors(before).iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["custom", "parent"]
+    );
+
+    let ordinary = "Body.\n<!-- stay:c -->\n";
+    let child = "Body.\n<!-- stay:c subhash=bogus -->\n";
+    let result = resolve(&build_anchors(ordinary), child, DEFAULT_THRESHOLD, DEFAULT_MARGIN);
+    assert_eq!(find(&result, "c").method, "hash");
+}
+
+#[test]
+fn staged_pairing_ignores_overlap_supplied_only_by_child_ids() {
+    let entries = [
+        CommitEntry {
+            status: 'D',
+            source: "old.md",
+            destination: "old.md",
+            before: Some("Old.\n<!-- stay:c subhash=bogus -->\n"),
+            after: None,
+        },
+        CommitEntry {
+            status: 'A',
+            source: "new.md",
+            destination: "new.md",
+            before: None,
+            after: Some("New.\n<!-- stay:c subhash=bogus -->\n"),
+        },
+    ];
+    let result = check_entries(&entries, &[]);
+    assert_eq!(result.pairings.len(), 1);
+    assert_eq!(result.pairings[0].path, "new.md");
+    assert_eq!(result.pairings[0].baseline, None);
+    assert!(result.notes.is_empty());
+    assert!(result.reports.is_empty());
 }
 
 #[test]
@@ -345,9 +424,11 @@ fn format_attr_value_bare_vs_quoted_with_escaping() {
 }
 
 #[test]
-fn format_attr_value_rejects_outside_qchar_set() {
-    // §4 qchar is printable ASCII only; tab/control/non-ASCII have no form.
+fn format_attr_value_rejects_outside_one_line_writer_set() {
+    // The §3.3 writer set is printable ASCII only. Normalized LF is valid reader
+    // qchar inside a quoted value (§4), but writer output must remain one line.
     assert!(matches!(format_attr_value("tab\there"), Err(FormatError::NonQchar(_))));
+    assert!(matches!(format_attr_value("line\nbreak"), Err(FormatError::NonQchar(_))));
     assert!(matches!(format_attr_value("café"), Err(FormatError::NonQchar(_))));
 }
 
@@ -377,8 +458,9 @@ fn format_marker_rejects_bad_id_non_hex_and_terminator_values() {
     assert!(format_marker("bad id", None, &[], Syntax::Html).is_err());
     assert!(format_marker("ok", Some("zz"), &[], Syntax::Html).is_err());
     assert!(format_marker("ok", None, &[("x-k", "a-->b")], Syntax::Html).is_err());
-    assert!(format_marker("ok", None, &[("x-k", "a*/}b")], Syntax::Mdx).is_err());
-    // A value bearing a newline is rejected by the qchar guard inside the marker.
+    assert!(format_marker("ok", None, &[("x-k", "a--!>b")], Syntax::Html).is_err());
+    assert!(format_marker("ok", None, &[("x-k", "a*/b")], Syntax::Mdx).is_err());
+    // Normalized LF is reader syntax only; the §3.3 writer contract rejects it.
     assert!(format_marker("x", None, &[("x-v", "line\nbreak")], Syntax::Html).is_err());
 }
 
@@ -500,6 +582,23 @@ fn restamp_add_missing_leaves_a_subhash_marker_alone() {
 }
 
 #[test]
+fn restamp_arbitrary_subhash_and_stale_container_hash_remain_untouched() {
+    let md = "- Alpha <!-- stay:k1 subhash=bogus hash=sha256:dead -->\n- Beta\n";
+    let opts = RestampOptions { add_missing: true, ..Default::default() };
+    let result = restamp(md, &opts);
+    assert_eq!(result.text, md);
+    assert!(result.refreshed.is_empty());
+}
+
+#[test]
+fn restamp_edits_the_parsed_hash_not_hash_text_inside_a_quoted_value() {
+    let md = "Body.\n<!-- stay:x x-note=\"hash=sha256:beef\" hash=sha256:dead -->\n";
+    let result = restamp(md, &RestampOptions::default());
+    assert!(result.text.contains("x-note=\"hash=sha256:beef\""));
+    assert!(!result.text.contains("hash=sha256:dead"));
+}
+
+#[test]
 fn stamp_subhash_marker_does_not_make_its_block_stamped() {
     // SPEC.md §16, the other half of the write-path shim: a tool with no child
     // support must not read child markers as evidence the list is done, or the
@@ -512,6 +611,17 @@ fn stamp_subhash_marker_does_not_make_its_block_stamped() {
     assert!(res.text.contains("<!-- stay:cont1 hash=sha256:"));
     assert!(res.text.contains("stay:c1 subhash=sha256:9d2f"));
     assert!(res.text.contains("stay:c2 subhash=sha256:41ac"));
+}
+
+#[test]
+fn stamp_arbitrary_subhash_does_not_make_its_block_stamped() {
+    let md = "A paragraph.\n<!-- stay:c1 subhash=bogus -->\n";
+    let opts = StampOptions { hash: false, ..Default::default() };
+    let result = stamp(md, &opts, || "parent".to_string());
+    assert_eq!(result.minted.len(), 1);
+    assert_eq!(result.minted[0].id, "parent");
+    assert!(result.text.contains("stay:c1 subhash=bogus"));
+    assert!(result.text.contains("stay:parent"));
 }
 
 #[test]

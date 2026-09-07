@@ -117,6 +117,20 @@ const VERIFIED_CATEGORIES: &[&str] = &[
     "preserve", "check", "anchors",
 ];
 
+// Optional profiles a corpus file may declare with a top-level `profile` key.
+// Every full runner knows the whole set; each advertises only what it
+// implements. A profile this runner has never HEARD of is a failure rather than
+// a skip, so a category added to the corpus without touching the runners cannot
+// pass as silence.
+//
+// SPEC.md §16 keeps §5.5 and §5.6 child segmentation OPTIONAL, and only the
+// Python reference implements it, so declining `rows` is conforming. Running
+// 419 of the 420 core vectors would not be, which is why the core count is
+// asserted rather than left to whatever happens to be on disk.
+const KNOWN_PROFILES: &[&str] = &["rows"];
+const ADVERTISED_PROFILES: &[&str] = &[];
+const CORE_VECTORS: usize = 420;
+
 fn verify(category: &str, v: &Value) -> (Value, Value) {
     match category {
         "hash" => {
@@ -409,10 +423,21 @@ fn corpus_dir() -> PathBuf {
 fn corpus_files() -> Vec<(String, PathBuf)> {
     let root = corpus_dir();
     let mut files = Vec::new();
-    for tier in ["spec", "gen"] {
+    for tier in ["spec", "gen", "rows"] {
         let dir = root.join(tier);
-        let mut names: Vec<PathBuf> = fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("read_dir {}: {}", dir.display(), e))
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // `spec` and `gen` are mandatory; an optional profile tier that has
+            // not been synced yet is not an error here, because the core-count
+            // and declared-profile assertions below are what hold the corpus to
+            // its shape.
+            Err(e) if tier != "spec" && tier != "gen" => {
+                let _ = e;
+                continue;
+            }
+            Err(e) => panic!("read_dir {}: {}", dir.display(), e),
+        };
+        let mut names: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
             .collect();
@@ -432,12 +457,31 @@ fn corpus() {
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    let mut declined: Vec<String> = Vec::new();
 
     for (tier, path) in &files {
         let data: Value =
             serde_json::from_str(&fs::read_to_string(path).expect("read corpus file"))
                 .expect("parse corpus json");
         let category = data["category"].as_str().expect("category string");
+        if let Some(profile) = data["profile"].as_str() {
+            assert!(
+                KNOWN_PROFILES.contains(&profile),
+                "corpus file {} declares profile {:?}, which this runner has never \
+                 heard of: add it to KNOWN_PROFILES, then advertise it or decline it \
+                 deliberately",
+                path.display(),
+                profile
+            );
+            if !ADVERTISED_PROFILES.contains(&profile) {
+                declined.push(format!(
+                    "{}:{}",
+                    profile,
+                    data["vectors"].as_array().expect("vectors array").len()
+                ));
+                continue;
+            }
+        }
         if !seen.iter().any(|c| c == category) {
             seen.push(category.to_string());
         }
@@ -462,8 +506,11 @@ fn corpus() {
         VERIFIED_CATEGORIES.iter().copied().filter(|c| !seen.iter().any(|s| s == c)).collect();
     assert!(missing.is_empty(), "verifiers with no vectors in the corpus: {:?}", missing);
 
+    assert_eq!(total, CORE_VECTORS, "core corpus vector count");
+    assert_eq!(declined, vec!["rows:23".to_string()], "declined optional profiles");
+
     let passed = total - failures.len();
-    println!("\n{}/{} corpus vectors pass ({} files)", passed, total, files.len());
+    println!("\n{}/{} core corpus vectors pass ({} files)", passed, total, files.len());
     assert!(
         failures.is_empty(),
         "{} of {} vectors failed:\n{}",

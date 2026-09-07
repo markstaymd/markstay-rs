@@ -463,7 +463,7 @@ fn check_worktree_sees_loss_before_staging_and_pairs_an_untracked_rename() {
 #[test]
 fn check_worktree_sees_indexed_files_before_the_first_commit() {
     let repo = temp_repo();
-    write_repo(&repo.path, "broken.md", "Body.\n<!-- stay: -->\n");
+    write_repo(&repo.path, "broken.md", "Body.\n<!-- stay:note=hello -->\n");
     git(&repo.path, &["add", "broken.md"]);
 
     let output = run_at(&repo.path, &["check-worktree"]);

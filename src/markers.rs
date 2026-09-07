@@ -1,32 +1,12 @@
-// Marker grammar and discovery (SPEC.md §3 / §4). Port of impl/js/src/markers.js
-// (`findMarkers`, `stripMarkers`), which ports the marker regexes and
-// `find_markers` / `_strip_markers` from the Python reference.
-//
-// The reference does a raw-text scan: the body is captured lazily up to the
-// closing delimiter, then id / hash are pulled out of it. The other impls use a
-// regex (`re` / `RegExp`); here the scanner is hand-rolled to stay zero-dep (the
-// grammar is tiny and fixed). The two regexes it reproduces are:
-//
-//   HTML: <!--\s*(stay:.*?)\s*-->        (DOTALL)
-//   MDX:  \{/\*\s*(stay:.*?)\s*\*/\}     (DOTALL)
-//
-// The capture group always begins with `stay:`, so a marker-shaped comment whose
-// first token is not `stay:` is not a marker. A marker-shaped comment inside a
-// code fence IS treated as a real marker (current reference behaviour; pinned by
-// the corpus). `\s` is taken as ASCII whitespace, which agrees with Python/JS on
-// the corpus (marker whitespace is kept ASCII).
-//
-// Scanning is byte-based and safe: the delimiters and whitespace are all ASCII,
-// so every slice boundary (open start, `stay:` start, close start) lands on a
-// UTF-8 char boundary even when the body contains multibyte text, and an ASCII
-// byte never occurs inside a multibyte sequence (so a byte search for `-->` etc.
-// cannot false-match mid-character).
+//! Strict host-first marker discovery (SPEC.md §3 / §4).
+//!
+//! Recognition uses an LF-normalized view, while every returned span and `raw`
+//! string addresses the caller's original bytes. One scanner feeds discovery,
+//! stripping, fenced-code masking, and rewriting.
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-
-use crate::text::rstrip_line_ws;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Syntax {
@@ -45,37 +25,48 @@ impl Syntax {
 
 #[derive(Clone, Debug)]
 pub struct Marker {
-    /// The positional id (first token after `stay:`), or `None` if malformed.
+    /// The positional id, or `None` for the required no-id diagnostic shape.
     pub id: Option<String>,
-    /// The block hash, canonically lowercase hex, or `None` if absent.
+    /// A valid bare `hash=sha256:<hex>`, folded lowercase.
     pub hash: Option<String>,
-    /// The full marker text, delimiters included.
+    /// A valid bare `subhash=sha256:<hex>`, folded lowercase.
+    pub subhash: Option<String>,
+    /// Exact parsed-key presence, independent of the subhash value's validity.
+    pub has_subhash: bool,
+    /// Exact original marker serialization, delimiters included.
     pub raw: String,
     pub syntax: Syntax,
-    /// 1-based line number of the marker start in the document.
+    /// 1-based line number after CRLF/lone-CR normalization.
     pub line: usize,
-    /// True when no parseable id was found (`id` is `None`).
     pub malformed: bool,
+    // Raw-relative spans used by write surgery. Keeping these on the parsed
+    // marker prevents the writer from growing a second attribute grammar.
+    pub(crate) stay_span: Option<(usize, usize)>,
+    pub(crate) hash_span: Option<(usize, usize, usize)>,
+}
+
+impl Marker {
+    /// Whether this lexical token may identify its containing §5 block.
+    pub fn is_block_stay(&self) -> bool {
+        !self.malformed && !self.has_subhash
+    }
 }
 
 #[inline]
 pub(crate) fn is_ws_byte(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)
+    matches!(b, b' ' | b'\t')
 }
 
-#[inline]
-fn is_id_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
-}
-
-/// Byte form of [`is_id_char`]: a §6 id character `[A-Za-z0-9_-]`. Shared with
-/// the write path (id minting / marker serialization), which scans bytes.
 #[inline]
 pub(crate) fn is_id_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
-/// First index of `needle` in `haystack`, or `None`.
+#[inline]
+fn is_key_start(b: u8) -> bool {
+    b.is_ascii_alphabetic()
+}
+
 pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
@@ -83,305 +74,367 @@ pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.len() > haystack.len() {
         return None;
     }
-    let last = haystack.len() - needle.len();
-    let mut i = 0;
-    while i <= last {
-        if &haystack[i..i + needle.len()] == needle {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
-/// One raw marker match: byte offset of the open delimiter, the full match text,
-/// and the trimmed group body (starting with `stay:`).
-pub(crate) struct RawMatch {
-    pub(crate) start: usize,
-    pub(crate) raw: String,
-    pub(crate) body: String,
+struct NormalizedView {
+    text: String,
+    /// Normalized byte boundary -> original byte boundary.
+    raw_boundaries: Vec<usize>,
 }
 
-/// Scan `text` for every `open ... close` marker (matching the regex semantics
-/// in the module header) in document order.
-fn scan(text: &str, open: &[u8], close: &[u8]) -> Vec<RawMatch> {
+fn normalized_view(text: &str) -> NormalizedView {
     let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    while let Some(rel) = find_sub(&bytes[pos..], open) {
-        let open_pos = pos + rel;
-        // \s* after the open delimiter
-        let mut i = open_pos + open.len();
-        while i < bytes.len() && is_ws_byte(bytes[i]) {
-            i += 1;
-        }
-        // The group must begin with the literal `stay:`.
-        if !bytes[i..].starts_with(b"stay:") {
-            pos = open_pos + 1;
-            continue;
-        }
-        let group_start = i;
-        // Lazy `.*?` then `\s*close`: the body extends to the FIRST close
-        // delimiter (search past the fixed `stay:`), with trailing ASCII
-        // whitespace stripped (the greedy `\s*` eats it).
-        let search_from = group_start + 5;
-        match find_sub(&bytes[search_from..], close) {
-            None => {
-                // No closing delimiter for this open: not a match here.
-                pos = open_pos + 1;
+    let mut normalized = String::with_capacity(text.len());
+    let mut raw_boundaries = Vec::with_capacity(text.len() + 1);
+    raw_boundaries.push(0);
+    let mut raw = 0usize;
+    while raw < bytes.len() {
+        if bytes[raw] == b'\r' {
+            raw += if bytes.get(raw + 1) == Some(&b'\n') { 2 } else { 1 };
+            normalized.push('\n');
+            raw_boundaries.push(raw);
+        } else {
+            let width =
+                text[raw..].chars().next().expect("raw offset is a char boundary").len_utf8();
+            normalized.push_str(&text[raw..raw + width]);
+            for delta in 1..=width {
+                raw_boundaries.push(raw + delta);
             }
-            Some(crel) => {
-                let q = search_from + crel;
-                let raw = text[open_pos..q + close.len()].to_string();
-                let body = rstrip_line_ws(&text[group_start..q]).to_string();
-                out.push(RawMatch { start: open_pos, raw, body });
-                pos = q + close.len();
-            }
+            raw += width;
         }
     }
-    out
+    NormalizedView { text: normalized, raw_boundaries }
 }
 
-/// Every marker in `text`, both syntaxes, in one left-to-right pass in document
-/// order (with its [`Syntax`]).
-///
-/// The JS reference uses a single combined `HTML|MDX` regex, so matching consumes
-/// each match: a marker delimiter inside an already-matched marker is never a
-/// separate match. This reproduces that by merging the two per-syntax scans and
-/// only ever taking the next match at or after the previous match's end (HTML wins
-/// a start-position tie, which the distinct open delimiters make impossible in
-/// practice). Every caller that must see markers *in order* (rewriting them,
-/// masking them against §3.3) shares this one merge rather than re-deriving it.
-pub(crate) fn scan_all(text: &str) -> Vec<(RawMatch, Syntax)> {
-    let html = scan(text, b"<!--", b"-->");
-    let mdx = scan(text, b"{/*", b"*/}");
-    let mut hi = 0usize;
-    let mut mi = 0usize;
-    let mut cursor = 0usize;
-    let mut out: Vec<(RawMatch, Syntax)> = Vec::with_capacity(html.len() + mdx.len());
-    loop {
-        while hi < html.len() && html[hi].start < cursor {
-            hi += 1;
-        }
-        while mi < mdx.len() && mdx[mi].start < cursor {
-            mi += 1;
-        }
-        let use_html = match (html.get(hi).map(|m| m.start), mdx.get(mi).map(|m| m.start)) {
-            (None, None) => break,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (Some(hs), Some(ms)) => hs <= ms,
-        };
-        let (chosen, syntax) =
-            if use_html { (&html[hi], Syntax::Html) } else { (&mdx[mi], Syntax::Mdx) };
-        cursor = chosen.start + chosen.raw.len();
-        out.push((
-            RawMatch { start: chosen.start, raw: chosen.raw.clone(), body: chosen.body.clone() },
-            syntax,
-        ));
-    }
-    out
+#[derive(Clone)]
+struct Attribute {
+    key: String,
+    value: String,
+    quoted: bool,
+    key_start: usize,
+    value_start: usize,
+    value_end: usize,
 }
 
-/// Parse the positional id from a marker body (`^stay:\s*([A-Za-z0-9_-]+)(?=\s|$)`).
-/// Returns `None` when no id token is present or the id is followed by a non-ws,
-/// non-end character (e.g. `stay:note=hello`), which makes the marker malformed.
-fn parse_id(body: &str) -> Option<String> {
-    let rest = body.strip_prefix("stay:")?;
-    let rest = rest.trim_start_matches(crate::text::is_ws);
-    let run: String = rest.chars().take_while(|&c| is_id_char(c)).collect();
-    if run.is_empty() {
+struct ParsedBody {
+    id: String,
+    id_end: usize,
+    attributes: Vec<Attribute>,
+}
+
+fn parse_body(body: &str) -> Option<ParsedBody> {
+    let bytes = body.as_bytes();
+    if !bytes.starts_with(b"stay:") {
         return None;
     }
-    // Lookahead: the char after the id run must be ASCII whitespace or end.
-    // (Shrinking the run only ever exposes another id char, never whitespace, so
-    // the lookahead can succeed only at the maximal run boundary.)
-    let after = &rest[run.len()..]; // run is ASCII => byte len == char count
-    match after.chars().next() {
-        None => Some(run),
-        Some(c) if crate::text::is_ws(c) => Some(run),
-        _ => None,
+    let mut pos = 5usize;
+    let id_start = pos;
+    while bytes.get(pos).is_some_and(|b| is_id_byte(*b)) {
+        pos += 1;
+    }
+    if pos == id_start || (pos < bytes.len() && !is_ws_byte(bytes[pos])) {
+        return None;
+    }
+    let id = body[id_start..pos].to_string();
+    let id_end = pos;
+    let mut attributes = Vec::new();
+
+    while pos < bytes.len() {
+        let separator_start = pos;
+        while bytes.get(pos).is_some_and(|b| is_ws_byte(*b)) {
+            pos += 1;
+        }
+        if pos == bytes.len() {
+            break;
+        }
+        if pos == separator_start || !is_key_start(bytes[pos]) {
+            return None;
+        }
+        let key_start = pos;
+        pos += 1;
+        while bytes.get(pos).is_some_and(|b| is_id_byte(*b)) {
+            pos += 1;
+        }
+        let key = body[key_start..pos].to_string();
+        if bytes.get(pos) != Some(&b'=') {
+            return None;
+        }
+        pos += 1;
+        if pos == bytes.len() {
+            return None;
+        }
+
+        let quoted = bytes[pos] == b'"';
+        let value_start;
+        let value_end;
+        if quoted {
+            pos += 1;
+            value_start = pos;
+            while pos < bytes.len() && bytes[pos] != b'"' {
+                match bytes[pos] {
+                    b'\\' => {
+                        if !matches!(bytes.get(pos + 1), Some(b'\\' | b'"')) {
+                            return None;
+                        }
+                        pos += 2;
+                    }
+                    b'\n' | 0x20..=0x21 | 0x23..=0x5b | 0x5d..=0x7e => pos += 1,
+                    _ => return None,
+                }
+            }
+            if pos == bytes.len() {
+                return None;
+            }
+            value_end = pos;
+            pos += 1;
+        } else {
+            value_start = pos;
+            while pos < bytes.len() && !is_ws_byte(bytes[pos]) {
+                if bytes[pos] == b'"' || !(0x21..=0x7e).contains(&bytes[pos]) {
+                    return None;
+                }
+                pos += 1;
+            }
+            if pos == value_start {
+                return None;
+            }
+            value_end = pos;
+        }
+        attributes.push(Attribute {
+            key,
+            value: body[value_start..value_end].to_string(),
+            quoted,
+            key_start,
+            value_start,
+            value_end,
+        });
+    }
+    Some(ParsedBody { id, id_end, attributes })
+}
+
+fn malformed_key_first(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    if !bytes.starts_with(b"stay:") || !bytes.get(5).is_some_and(|b| is_key_start(*b)) {
+        return false;
+    }
+    let mut pos = 6usize;
+    while bytes.get(pos).is_some_and(|b| is_id_byte(*b)) {
+        pos += 1;
+    }
+    bytes.get(pos) == Some(&b'=')
+}
+
+fn digest(value: &str, quoted: bool) -> Option<String> {
+    if quoted {
+        return None;
+    }
+    let hex = value.strip_prefix("sha256:")?;
+    if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex.to_ascii_lowercase())
+}
+
+#[derive(Clone)]
+pub(crate) struct MarkerRecord {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) marker: Marker,
+}
+
+fn next_opener(text: &[u8], from: usize) -> Option<(usize, Syntax, usize)> {
+    let html = find_sub(&text[from..], b"<!--").map(|n| from + n);
+    let mdx = find_sub(&text[from..], b"{/*").map(|n| from + n);
+    match (html, mdx) {
+        (None, None) => None,
+        (Some(start), None) => Some((start, Syntax::Html, 4)),
+        (None, Some(start)) => Some((start, Syntax::Mdx, 3)),
+        (Some(h), Some(m)) if h <= m => Some((h, Syntax::Html, 4)),
+        (Some(_), Some(m)) => Some((m, Syntax::Mdx, 3)),
     }
 }
 
-/// Byte span `(stay_start, id_end)` of the first `stay:\s*<id>` token in `s`,
-/// the write-path counterpart to `parse_id`. Deliberately asymmetric with the
-/// read parser: it has no `^stay:` anchor and no `(?=\s|$)` lookahead, so in
-/// isolation it would accept an id `parse_id` rejects (a later `stay:`, or
-/// `stay:id=x`). That divergence is unreachable: restamp/repair only reach the
-/// marker-surgery helpers once `find_markers` has accepted a well-formed id, so
-/// the two grammars are kept separate rather than forced into one (a shared
-/// finder would rescue inputs the read path must reject). Used by stamp.rs
-/// (replace_stay_id / insert_hash_after_stay).
-pub(crate) fn find_stay_span(s: &str) -> Option<(usize, usize)> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = find_sub(&bytes[i..], b"stay:") {
-        let at = i + rel;
-        let mut j = at + 5;
-        while j < bytes.len() && is_ws_byte(bytes[j]) {
-            j += 1;
+fn host_close(text: &[u8], syntax: Syntax, from: usize) -> Option<(usize, usize, bool)> {
+    match syntax {
+        Syntax::Mdx => {
+            let start = from + find_sub(&text[from..], b"*/")?;
+            let valid = text.get(start + 2) == Some(&b'}');
+            Some((start, start + if valid { 3 } else { 2 }, valid))
         }
-        let id_start = j;
-        while j < bytes.len() && is_id_byte(bytes[j]) {
-            j += 1;
+        Syntax::Html => {
+            let ordinary = find_sub(&text[from..], b"-->").map(|n| from + n);
+            let parse_error = find_sub(&text[from..], b"--!>").map(|n| from + n);
+            match (ordinary, parse_error) {
+                (None, None) => None,
+                (Some(start), None) => Some((start, start + 3, true)),
+                (None, Some(start)) => Some((start, start + 4, false)),
+                (Some(o), Some(p)) if o <= p => Some((o, o + 3, true)),
+                (Some(_), Some(p)) => Some((p, p + 4, false)),
+            }
         }
-        if j > id_start {
-            return Some((at, j));
-        }
-        i = at + 1;
     }
-    None
 }
 
-/// Byte span of the first well-formed `hash=sha256:<hex>` attribute in `s`, as
-/// `(key_start, hex_start, hex_end)`: `key_start` is the `h` of `hash`, and
-/// `hex_start..hex_end` is the hex value as written (mixed case).
-///
-/// The boundary is **whitespace** (the byte before `hash` is ASCII whitespace, or
-/// the string start), which is the boundary SPEC.md §4's attribute grammar actually
-/// has: an attribute is a whitespace-separated token. So a `hash` embedded in a
-/// longer custom key is skipped whether it is written `rehash` or `x-hash`, and a
-/// word boundary is not enough, since a hyphen is not a word byte and the write path
-/// would splice over a §4 key it is required to preserve.
-///
-/// Canonical home of the HASH grammar: the read path (`parse_hash`) lowercases
-/// `hex_start..hex_end`; the write path (`replace_first_hash` in stamp.rs) splices
-/// over `key_start..hex_end`. Both get the same boundary from here.
-pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
-    let bytes = s.as_bytes();
-    let mut from = 0usize;
-    while let Some(rel) = find_sub(&bytes[from..], b"hash") {
-        let at = from + rel;
-        // Attribute boundary: the previous byte is whitespace, or `hash` starts the
-        // string. See the doc comment for why a word boundary is the wrong test.
-        if at != 0 && !is_ws_byte(bytes[at - 1]) {
-            from = at + 1;
+pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerRecord> {
+    let view = normalized_view(text);
+    let normalized = view.text.as_bytes();
+    let mut records = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < normalized.len() {
+        let Some((open_start, syntax, open_len)) = next_opener(normalized, cursor) else { break };
+        let mut body_start = open_start + open_len;
+        while normalized.get(body_start).is_some_and(|b| is_ws_byte(*b)) {
+            body_start += 1;
+        }
+        if !normalized[body_start..].starts_with(b"stay:") {
+            cursor = open_start + 1;
             continue;
         }
-        let mut j = at + 4;
-        while j < bytes.len() && is_ws_byte(bytes[j]) {
-            j += 1;
+        let Some((close_start, close_end, close_valid)) =
+            host_close(normalized, syntax, body_start + 5)
+        else {
+            cursor = open_start + 1;
+            continue;
+        };
+        let body = &view.text[body_start..close_start];
+        let parsed = if close_valid { parse_body(body) } else { None };
+        let malformed = parsed.is_none() && malformed_key_first(body);
+        if parsed.is_none() && !malformed {
+            cursor = open_start + 1;
+            continue;
         }
-        if j < bytes.len() && bytes[j] == b'=' {
-            j += 1;
-            while j < bytes.len() && is_ws_byte(bytes[j]) {
-                j += 1;
-            }
-            if bytes[j..].starts_with(b"sha256:") {
-                let hex_start = j + 7;
-                let mut k = hex_start;
-                while k < bytes.len() && bytes[k].is_ascii_hexdigit() {
-                    k += 1;
+
+        let raw_start = view.raw_boundaries[open_start];
+        let raw_end = view.raw_boundaries[close_end];
+        let raw_body_start = view.raw_boundaries[body_start];
+        let mut block_hash = None;
+        let mut child_hash = None;
+        let mut has_subhash = false;
+        let mut stay_span = None;
+        let mut hash_span = None;
+        if let Some(parsed) = &parsed {
+            stay_span = Some((
+                raw_body_start - raw_start,
+                view.raw_boundaries[body_start + parsed.id_end] - raw_start,
+            ));
+            for attr in &parsed.attributes {
+                let value_digest = digest(&attr.value, attr.quoted);
+                if attr.key == "hash" && block_hash.is_none() {
+                    if let Some(value) = value_digest.clone() {
+                        block_hash = Some(value);
+                        let key_start =
+                            view.raw_boundaries[body_start + attr.key_start] - raw_start;
+                        let value_start =
+                            view.raw_boundaries[body_start + attr.value_start] - raw_start;
+                        let value_end =
+                            view.raw_boundaries[body_start + attr.value_end] - raw_start;
+                        hash_span = Some((key_start, value_start + 7, value_end));
+                    }
                 }
-                if k > hex_start {
-                    return Some((at, hex_start, k));
+                if attr.key == "subhash" {
+                    has_subhash = true;
+                    if child_hash.is_none() {
+                        child_hash = value_digest;
+                    }
                 }
             }
         }
-        from = at + 1;
+        let line =
+            line_offset + normalized[..open_start].iter().filter(|&&b| b == b'\n').count() + 1;
+        let marker = Marker {
+            id: parsed.as_ref().map(|p| p.id.clone()),
+            hash: block_hash,
+            subhash: child_hash,
+            has_subhash,
+            raw: text[raw_start..raw_end].to_string(),
+            syntax,
+            line,
+            malformed,
+            stay_span,
+            hash_span,
+        };
+        records.push(MarkerRecord { start: raw_start, end: raw_end, marker });
+        // Every opener is an independent candidate. A valid outer marker does
+        // not hide a nested opener from §5.6's overlap refusal.
+        cursor = open_start + 1;
     }
-    None
+    records
 }
 
-/// Parse the block hash from a marker body
-/// (`hash=sha256:<hex>`, whitespace-bounded), returned lowercase. First match wins.
-fn parse_hash(body: &str) -> Option<String> {
-    let (_, hex_start, hex_end) = find_hash_hex_span(body)?;
-    Some(body[hex_start..hex_end].to_ascii_lowercase())
-}
-
-/// All markstay markers in `text`, ordered by position. `line_offset` is the
-/// 0-based line index where `text` begins in the full document.
 pub fn find_markers(text: &str, line_offset: usize) -> Vec<Marker> {
-    let bytes = text.as_bytes();
-    let mut raws: Vec<(usize, String, String, Syntax)> = Vec::new();
-    for &(open, close, syn) in &[
-        (b"<!--".as_slice(), b"-->".as_slice(), Syntax::Html),
-        (b"{/*".as_slice(), b"*/}".as_slice(), Syntax::Mdx),
-    ] {
-        for m in scan(text, open, close) {
-            raws.push((m.start, m.raw, m.body, syn));
-        }
-    }
-    raws.sort_by_key(|t| t.0);
-
-    let mut out = Vec::with_capacity(raws.len());
-    for (start, raw, body, syn) in raws {
-        let nl = bytes[..start].iter().filter(|&&b| b == b'\n').count();
-        let line = line_offset + nl + 1;
-        let id = parse_id(&body);
-        let hash = parse_hash(&body);
-        let malformed = id.is_none();
-        out.push(Marker { id, hash, raw, syntax: syn, line, malformed });
-    }
-    out
+    scan_marker_records(text, line_offset).into_iter().map(|record| record.marker).collect()
 }
 
-/// Remove every marker from `text` (HTML first, then MDX, as the reference).
+fn valid_records(text: &str) -> Vec<MarkerRecord> {
+    scan_marker_records(text, 0).into_iter().filter(|record| !record.marker.malformed).collect()
+}
+
 pub fn strip_markers(text: &str) -> String {
-    let stage1 = remove_matches(text, b"<!--", b"-->");
-    remove_matches(&stage1, b"{/*", b"*/}")
-}
-
-fn remove_matches(text: &str, open: &[u8], close: &[u8]) -> String {
-    let ms = scan(text, open, close);
-    if ms.is_empty() {
+    let records = valid_records(text);
+    if records.is_empty() {
         return text.to_string();
     }
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0usize;
-    for m in &ms {
-        let end = m.start + m.raw.len();
-        out.push_str(&text[last..m.start]);
-        last = end;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for record in records {
+        if let Some(previous) = ranges.last_mut() {
+            if record.start < previous.1 {
+                previous.1 = previous.1.max(record.end);
+                continue;
+            }
+        }
+        ranges.push((record.start, record.end));
     }
-    out.push_str(&text[last..]);
+    let mut out = String::with_capacity(text.len());
+    let mut previous = 0usize;
+    for (start, end) in ranges {
+        out.push_str(&text[previous..start]);
+        previous = end;
+    }
+    out.push_str(&text[previous..]);
     out
 }
 
-/// Rewrite markers in place, in document order, without disturbing surrounding
-/// text. Port of impl/js/src/markers.js `rewriteMarkers`. `transform(marker)`
-/// receives a [`Marker`] (`line` is 0 here; position is not tracked) and returns
-/// `Some(replacement)`, or `None` to leave the marker unchanged. The write
-/// helpers (restamp, repair_duplicates) build on this so marker edits reuse the
-/// one canonical grammar instead of re-deriving it.
-///
-/// `code` is the SPEC.md §3.3 mask for `text` (1-based line numbers inside a
-/// fenced code block). Matches opening on one of those lines are left
-/// byte-for-byte alone: they are an example, not a marker, and rewriting one is
-/// how a restamp overwrites a document's illustrative `hash=` values.
+/// Rewrite non-overlapping valid markers outside the optional fenced-code mask.
+/// Ambiguous overlapping spans remain byte-for-byte unchanged.
 pub fn rewrite_markers<F>(text: &str, mut transform: F, code: Option<&BTreeSet<usize>>) -> String
 where
     F: FnMut(&Marker) -> Option<String>,
 {
-    let bytes = text.as_bytes();
-    let masked = code.is_some_and(|c| !c.is_empty());
-    let mut last = 0usize;
-    let mut out = String::with_capacity(text.len());
-    for (m, syntax) in scan_all(text) {
-        if masked {
-            let nl = bytes[..m.start].iter().filter(|&&b| b == b'\n').count();
-            if code.unwrap().contains(&(nl + 1)) {
-                continue;
-            }
+    let records: Vec<MarkerRecord> = valid_records(text)
+        .into_iter()
+        .filter(|record| !code.is_some_and(|lines| lines.contains(&record.marker.line)))
+        .collect();
+    let mut overlaps = alloc::vec![false; records.len()];
+    for left in 0..records.len() {
+        let mut right = left + 1;
+        while right < records.len() && records[right].start < records[left].end {
+            overlaps[left] = true;
+            overlaps[right] = true;
+            right += 1;
         }
-        let id = parse_id(&m.body);
-        let marker = Marker {
-            id: id.clone(),
-            hash: parse_hash(&m.body),
-            raw: m.raw.clone(),
-            syntax,
-            line: 0,
-            malformed: id.is_none(),
-        };
-        out.push_str(&text[last..m.start]);
-        match transform(&marker) {
-            Some(repl) => out.push_str(&repl),
-            None => out.push_str(&marker.raw),
-        }
-        last = m.start + m.raw.len();
     }
-    out.push_str(&text[last..]);
+    let mut out = String::with_capacity(text.len());
+    let mut previous = 0usize;
+    for (index, record) in records.into_iter().enumerate() {
+        if overlaps[index] {
+            continue;
+        }
+        out.push_str(&text[previous..record.start]);
+        match transform(&record.marker) {
+            Some(replacement) => out.push_str(&replacement),
+            None => out.push_str(&record.marker.raw),
+        }
+        previous = record.end;
+    }
+    out.push_str(&text[previous..]);
     out
+}
+
+pub(crate) fn find_stay_span(s: &str) -> Option<(usize, usize)> {
+    scan_marker_records(s, 0).into_iter().next()?.marker.stay_span
+}
+
+pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
+    scan_marker_records(s, 0).into_iter().next()?.marker.hash_span
 }

@@ -61,7 +61,7 @@ pub fn build_anchors_from_blocks(blocks: &[Block]) -> Vec<Anchor> {
             suffix: window_suffix(&next),
         };
         for mk in &b.markers {
-            if mk.malformed {
+            if !mk.is_block_stay() {
                 continue;
             }
             if let Some(id) = &mk.id {
@@ -100,7 +100,7 @@ pub fn resolve_over_blocks(
     let mut surviving: Vec<(String, usize)> = Vec::new();
     for (idx, b) in after_blocks.iter().enumerate() {
         for mk in &b.markers {
-            if mk.malformed {
+            if !mk.is_block_stay() {
                 continue;
             }
             if let Some(id) = &mk.id {

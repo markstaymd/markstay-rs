@@ -65,7 +65,7 @@ fn ids_of(text: Option<&str>) -> BTreeSet<String> {
             continue;
         }
         for marker in block.markers {
-            if !marker.malformed {
+            if marker.is_block_stay() {
                 if let Some(id) = marker.id {
                     ids.insert(id);
                 }

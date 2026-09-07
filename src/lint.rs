@@ -82,15 +82,8 @@ pub fn lint_blocks(blocks: &[Block]) -> Vec<Finding> {
                 continue;
             }
             let id = mk.id.clone().unwrap_or_default();
-            if orphan {
-                findings.push(finding(
-                    Level::Error,
-                    "ORPHAN_MARKER",
-                    format!("marker {} has no preceding block to attach to", id),
-                    Some(id.clone()),
-                    Some(mk.line),
-                ));
-            }
+            // Duplicate ids remain a document-global lexical invariant even
+            // when §16 excludes a child marker from container attribution.
             if let Some((_, first)) = seen.iter().find(|(k, _)| *k == id) {
                 findings.push(finding(
                     Level::Error,
@@ -101,6 +94,19 @@ pub fn lint_blocks(blocks: &[Block]) -> Vec<Finding> {
                 ));
             } else {
                 seen.push((id.clone(), mk.line));
+            }
+            if orphan {
+                findings.push(finding(
+                    Level::Error,
+                    "ORPHAN_MARKER",
+                    format!("marker {} has no preceding block to attach to", id),
+                    Some(id.clone()),
+                    Some(mk.line),
+                ));
+                continue;
+            }
+            if !mk.is_block_stay() {
+                continue;
             }
             if let Some(h) = &mk.hash {
                 if !b.content.is_empty() {
@@ -142,7 +148,7 @@ fn id_index<'a>(blocks: &'a [Block]) -> Vec<(String, Vec<&'a Block>)> {
             continue;
         }
         for mk in &b.markers {
-            if mk.malformed {
+            if !mk.is_block_stay() {
                 continue;
             }
             if let Some(id) = &mk.id {

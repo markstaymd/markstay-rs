@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.5-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.6-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.5), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.6), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -26,22 +26,13 @@ over code points), so the Rust core dropped in against the corpus **without forc
 a spec edit**, which is the strongest available evidence that the standard is
 unambiguous rather than defined by one implementation's quirks.
 
-**Child-block identity (§5.5) is not implemented here.** Version 1.3 lets a direct list
-item carry its own stay under the reserved `subhash` key, and §16 makes segmenting and
-resolving those **optional**. What §16 makes mandatory for every tool is the write-path
-shim, which this package honours: a `subhash` marker is preserved verbatim, never given
-a container hash, and never counted as its block's stay. The Python reference implements
-the section itself.
-
-## Install
-
-```sh
-cargo add markstay        # library
-cargo install markstay    # or the `markstay` CLI (single static binary)
-```
-
-Zero runtime dependencies. The core is `#![no_std]` + `alloc` (links no `std`); the
-CLI binary and the test suite own `std`.
+**Child-block identity (§5.5 and §5.6) is not implemented here.** Version 1.3 lets a
+direct list item carry its own stay under the reserved `subhash` key; version 1.6
+does the same for a GFM table body row. Section 16 makes segmenting and resolving
+those **optional**. Its mandatory compatibility layer is parser-free: an exact
+`subhash` key, even with an invalid digest, is preserved verbatim, is never given a
+container hash, and is never reported as its containing block's stay. The Python
+reference implements child segmentation and resolution.
 
 ## Why a Rust port (and what it is not)
 
@@ -49,9 +40,10 @@ CLI binary and the test suite own `std`.
   systems language that is explicit about the byte/char/code-point distinction §8
   and §9 turn on. Bit-for-bit agreement here (incl. non-BMP `seqmatch` vectors) is
   the real test.
-- **A runtime-free artifact.** The library is `no_std` + `alloc` with zero runtime
-  dependencies, so it is also the source for a small WASM module and a single static
-  CLI binary that needs no interpreter (Python needs the runtime, Node needs Node).
+- **A runtime-free artifact.** The library is `no_std` + `alloc` (links no `std`),
+  with zero runtime dependencies, so it is also the source for a small WASM module
+  and a single static CLI binary that needs no interpreter (Python needs the
+  runtime, Node needs Node).
 - **Not a speed play.** These documents are tiny; the case is conformance plus a
   genuinely usable, dependency-free artifact, not performance.
 
@@ -75,7 +67,7 @@ use markstay as M;
 
 let md = "The ingest stage retries three times.\n<!-- stay:a1b2 -->\n";
 
-// parse into content blocks with attached markers (§5)
+// parse into content blocks with lexical marker tokens (§5/§16)
 let blocks = M::parse_document(md);
 
 // well-formedness + intra-doc invariants (§7): duplicate/orphan/malformed/drift
@@ -94,12 +86,14 @@ let resolutions = M::resolve(&anchors, after_md, M::DEFAULT_THRESHOLD, M::DEFAUL
 ```
 
 Public API (mirrors the JS `index.js` surface, snake_case): `normalize_body`,
-`body_hash`, `ascii_trim`, `find_markers`, `strip_markers`, `segment_blank_line`,
+`body_hash`, `ascii_trim`, `find_markers`, `strip_markers`, `fence_state`,
+`code_lines`, `strip_markers_outside_code`, `segment_blank_line`,
 `parse_document`, `lint_document`, `lint_blocks`, `lint_diff`, `lint_diff_blocks`,
 `sort_findings`, `has_errors`, `ratio`, `matching_blocks`, `normalize`,
 `quote_ratio`, `body_score`, `context_bonus`, `best_match`, `build_anchors`,
 `build_anchors_from_blocks`, `resolve`, `resolve_over_blocks`, plus the
-`DEFAULT_THRESHOLD` / `DEFAULT_MARGIN` / `CONTEXT_CHARS` constants.
+`DEFAULT_THRESHOLD` / `DEFAULT_MARGIN` / `CONTEXT_CHARS` constants. A parsed
+`Marker::is_block_stay()` applies §16's containing-block filter.
 `build_anchors_from_blocks` / `resolve_over_blocks` are the segmentation-neutral
 surfaces (a tree adapter's entry points).
 
@@ -169,14 +163,62 @@ byte-identical with and without `--show-drift`), so caches and re-embed triggers
 that treat a stale hash as fatal read those, unaffected.
 
 ```sh
-$ markstay lint --before old.md new.md
+$ cargo run --release -- lint --before old.md new.md
 old.md -> new.md:
   [error] DROPPED_ID           -  id b was in the baseline but is gone after the edit (silent loss)
   -> 1 error, 0 warn, 0 info
 ```
 
+## Layout
+
+```
+src/
+  ratio.rs     SequenceMatcher.ratio over Unicode code points (the §9 crux)
+  sha256.rs    vendored public-domain SHA-256 (FIPS 180-4)
+  hash.rs      §8 normalization + SHA-256 body hashing
+  text.rs      ASCII whitespace + ASCII case-fold helpers
+  markers.rs   §3/§4 strict host-first grammar + discovery + rewrite
+  code.rs      §3.3 fenced-code mask (a marker in a fence is content)
+  segment.rs   §5 blank-line block segmentation
+  parse.rs     §5 document -> content blocks with lexical marker tokens
+  lint.rs      §7/§8/§10 lint + §11 regeneration diff
+  quote.rs     §9 quote/selector recovery scoring
+  resolve.rs   §9.1 resolution ladder (marker -> hash -> quote -> detached)
+  id.rs        §6 opaque id minting (injected byte source, no_std)
+  stamp.rs     §3/§4/§6/§7/§8 write path (stamp/restamp/repair, marker serialization)
+  staged.rs    alloc-only commit checking + stay-id baseline pairing (§11)
+  lib.rs       public re-exports
+  bin/markstay.rs   thin CLI (preserve/lint/check/write subcommands; Git lives here)
+tests/
+  conformance.rs    loads conformance/{spec,gen,rows}/*.json (../../conformance)
+                    rows is an optional profile this runner declines, and it is
+                    loaded so the decline can be asserted rather than assumed
+  unit.rs           ports of test_lint.py / test_attach.py / stamp.test.js assertions
+```
+
 ## Segmentation notes
 
+- **Text inside a fenced code block is content, not markup (§3.3):** a
+  marker-shaped string there identifies no block, stays in the hashed body, and
+  never makes its block stamped; a writer will not put one there either. That is
+  what lets a document *about* markstay show its own markers in examples, which is
+  the document the rule exists for. Recognition is a line scan applied once over
+  the whole document, on the frontmatter precedent, because neither segmenter has a
+  concept of a fence: at most three leading **spaces** (a tab is not one of them,
+  since CommonMark expands it against a column model this rule deliberately does
+  not have), then three or more backticks or tildes, closed by the first later line
+  that is a run of the same character at least as long, followed by nothing but
+  spaces and tabs. An unclosed fence runs to the end of the document, and a
+  backtick fence's info string may not contain a backtick. **Its limit is stated
+  rather than hidden**: a fence indented four spaces or carrying a blockquote or
+  list-item prefix on the opening line is invisible to the line scan, so a marker
+  after it can go silent. It fails closed (nothing is compared, the block just
+  looks unstamped) rather than corrupting anything. **Inline code spans are
+  deliberately out of scope**: a marker mangled into a span is still one a tool can
+  see, which beats one that has silently stopped existing. **Migration:** a
+  document whose body gained a fenced marker-shaped string drifts once and a
+  `restamp` clears it; a fence whose only marker was an example is now unstamped
+  and takes a fresh stay on the next `stamp`.
 - **Leading YAML frontmatter is metadata, not a block (§5.3):** it is skipped before
   segmentation, so it is never a block, never stamped, and never hashed , a
   metadata-only edit (`status: draft` -> `status: done`) must not read as a content
@@ -205,12 +247,17 @@ old.md -> new.md:
 
 ## Conformance
 
-`tests/conformance.rs` loads the vendored corpus at `./conformance` (spec/ then
-gen/) and recomputes every vector, comparing with a 1e-9 float tolerance and
-identical key sets. **408/408 corpus vectors pass** (168 hand-authored `spec/` + 240
-generated `gen/`, 22 files), incl. every `seqmatch` vector (143, with non-BMP) to
-delta 0 and the `stamp`/`mint` write-path vectors shared with JS/Python. The
-`check` category carries 13 commit-shaped inputs and asserts baseline pairings,
+`tests/conformance.rs` loads the shared corpus at `../../conformance` (spec/ then
+gen/ then the optional profile tiers, never tree/) and recomputes every vector,
+comparing with a 1e-9 float tolerance and identical key sets. **420/420 core
+corpus vectors pass** (180 hand-authored `spec/` + 240 generated `gen/`, 22 files),
+incl. every `seqmatch` vector (143, with non-BMP) to delta 0 and the `stamp`/`mint`
+write-path vectors shared with JS/Python. The optional `rows` profile (SPEC.md §5.6
+table-row identity, 23 vectors) is **declined**: §16 keeps child segmentation
+optional and this implementation does not segment child blocks. The decline is
+asserted rather than implicit, so the test fails if the profile vanishes from the
+corpus, if its vector count changes, or if a profile it has never heard of turns
+up. The `check` category carries 14 commit-shaped inputs and asserts baseline pairings,
 findings, moves, Markdown tracking departures, deletion notes, and scope. The
 `preserve` category is the odd one: it holds the §11 instruction as plain prose
 rather than a computation, so this crate's `const` copy cannot drift from the npm
@@ -222,19 +269,20 @@ cargo clippy --all-targets
 cargo build --release
 ```
 
-This crate's corpus is a vendored copy of the markstay project's shared corpus, so
-`git clone && cargo test` verifies cross-impl conformance standalone. Upstream, the
-Rust runner joins the Python and JS runners as a regression sentinel: any change to
-any implementation that breaks bit-for-bit agreement fails one of the three.
+This runner joins the Python and JS runners as a cross-implementation regression
+sentinel: any change to any implementation that breaks bit-for-bit agreement fails
+one of the three. Re-run all three before any spec edit:
+
+```sh
+python3 conformance/run_py.py \
+  && (cd impl/js && node --test) \
+  && (cd impl/rs && cargo test)
+```
 
 ## Deferred (not in v1)
 
-- **CommonMark mode (§5.2)** , needs a Markdown parser, which reopens
-  parser-equivalence and pulls a dependency. Left to a tree adapter, as the JS
-  baseline leaves it to `remark-stay`.
+- **CommonMark mode (§5.2)** , needs a Markdown parser (`comrak` /
+  `pulldown-cmark`), which reopens parser-equivalence and pulls a dependency. Left
+  to a tree adapter, as the JS baseline leaves it to `remark-stay`.
 - **WASM packaging** , a separate track; WASM is packaging of this corpus-green
   core, not new logic.
-
-## License
-
-MIT. The vendored SHA-256 (`src/sha256.rs`) is public domain (FIPS 180-4).

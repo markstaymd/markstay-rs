@@ -30,18 +30,17 @@ use crate::text::ascii_trim;
 /// negligible, while staying lighter than the full 64-char digest.
 pub const DEFAULT_HASH_LENGTH: usize = 12;
 
-/// Closing delimiter per syntax: a written value must never contain it, or it
-/// would terminate the marker early.
-fn terminator(syntax: Syntax) -> &'static str {
+fn contains_host_closer(body: &str, syntax: Syntax) -> bool {
     match syntax {
-        Syntax::Html => "-->",
-        Syntax::Mdx => "*/}",
+        Syntax::Html => body.contains("-->") || body.contains("--!>"),
+        Syntax::Mdx => body.contains("*/"),
     }
 }
 
 /// A marker serialization error (SPEC.md §3 / §4). Mirrors the JS `throw` /
 /// Python `raise`: a malformed id, a non-hex hash, a malformed attribute key, a
-/// value outside the §4 qchar set, or a value that would close the marker early.
+/// value outside the printable-ASCII set allowed by the one-line writer contract,
+/// or a value that would close the marker early.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FormatError {
     /// `id` does not match the §6 charset `[A-Za-z0-9_-]+`.
@@ -50,9 +49,13 @@ pub enum FormatError {
     NonHexHash(String),
     /// An attribute key does not match the §4 grammar `[A-Za-z][A-Za-z0-9_-]*`.
     InvalidKey(String),
-    /// A value contains a character outside the §4 qchar set (printable ASCII).
+    /// A value contains a character outside the one-line writer set.
+    ///
+    /// The historical variant name is retained for source compatibility. The §4
+    /// reader grammar admits normalized LF as `qchar` inside a quoted value, but
+    /// §3.3 requires writers to emit markers on one line.
     NonQchar(String),
-    /// A serialized value contains the syntax's closing delimiter.
+    /// A serialized value contains a host-comment closing sequence.
     Terminator(Syntax),
 }
 
@@ -123,11 +126,10 @@ fn is_valid_key(k: &str) -> bool {
 /// has no whitespace or double quote, and is all printable ASCII; otherwise a
 /// double-quoted string with `\` and `"` escaped.
 ///
-/// Returns [`FormatError::NonQchar`] if the value contains a character outside the
-/// §4 qchar set (printable ASCII 0x20-0x7E): a newline or other control character
-/// has no representation and would corrupt the marker.
+/// Readers admit normalized LF inside quotes, but §3.3 requires writers to emit
+/// markers on one line. This writer subset is printable ASCII 0x20-0x7E.
 pub fn format_attr_value(value: &str) -> Result<String, FormatError> {
-    // §4 qchar: printable ASCII only.
+    // §3.3's one-line writer subset of §4 values: printable ASCII only.
     if !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
         return Err(FormatError::NonQchar(value.to_string()));
     }
@@ -188,7 +190,7 @@ pub fn format_marker(
         body.push('=');
         body.push_str(&format_attr_value(v)?);
     }
-    if body.contains(terminator(syntax)) {
+    if contains_host_closer(&body, syntax) {
         return Err(FormatError::Terminator(syntax));
     }
     Ok(match syntax {
@@ -274,8 +276,7 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
         // stampable, or a child-stamped list never gets a stay of its own.
         let has_id = find_markers(&chunk, start - 1).iter().any(|mk| {
             mk.id.is_some()
-                && !mk.malformed
-                && !carries_subhash(&mk.raw)
+                && mk.is_block_stay()
                 // §3.3: an example never stamps its block.
                 && !code.contains(&mk.line)
         });
@@ -363,7 +364,7 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
             continue;
         }
         for mk in &b.markers {
-            if mk.malformed {
+            if !mk.is_block_stay() {
                 continue;
             }
             if let Some(id) = &mk.id {
@@ -380,6 +381,9 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
     let text = rewrite_markers(
         &norm,
         |mk: &Marker| {
+            if !mk.is_block_stay() {
+                return None;
+            }
             let id = mk.id.as_ref()?;
             let content = content_by_id.get(id)?;
             if let Some(stored) = &mk.hash {
@@ -391,12 +395,6 @@ pub fn restamp(md: &str, opts: &RestampOptions) -> RestampResult {
                 refreshed.push(id.clone());
                 Some(replace_first_hash(&mk.raw, &now))
             } else if opts.add_missing {
-                // SPEC.md §5.5: a marker carrying `subhash` addresses a list item,
-                // never the block around it, so the block's digest must not be added
-                // beside it.
-                if carries_subhash(&mk.raw) {
-                    return None;
-                }
                 let now = body_hash(content, Some(opts.hash_length.unwrap_or(DEFAULT_HASH_LENGTH)));
                 refreshed.push(id.clone());
                 Some(insert_hash_after_stay(&mk.raw, &now))
@@ -470,11 +468,10 @@ pub fn repair_duplicates(md: &str, mut new_id: impl FnMut() -> String) -> Repair
     RepairResult { text, renamed }
 }
 
-// --- raw-marker string surgery (mirrors the JS `mk.raw.replace(/.../, ...)`) ---
+// --- parsed-span marker surgery ---
 //
-// These reproduce the three single-shot regex substitutions the JS/Python write
-// helpers run over a marker's raw text. The Rust core has no regex, so each walks
-// the bytes using the shared scanner primitives from markers.rs.
+// All three edits reuse spans retained by the §4 scanner. This keeps attribute
+// text inside quoted extension values opaque to the writer.
 
 /// Replace the first `hash=sha256:<hex>` attribute in `raw` with
 /// `hash=sha256:{now}` (mirrors `re.sub(..., count=1)`). The skip of a `hash` inside
@@ -492,46 +489,6 @@ fn replace_first_hash(raw: &str, now: &str) -> String {
         }
         None => raw.to_string(),
     }
-}
-
-/// True when `raw` carries the reserved `subhash` attribute (SPEC.md §4, §5.5).
-///
-/// The boundary is whitespace, not a word boundary. An attribute is a
-/// whitespace-separated token, and a word boundary accepts a custom key merely
-/// ENDING in the reserved one, because a hyphen is not a word byte:
-/// `x-subhash=sha256:ab` would read as `subhash` and this tool would act on an
-/// attribute §4 tells it to preserve and ignore. Nothing conforming loses by the
-/// tighter rule, since every attribute follows whitespace.
-///
-/// Written out rather than reusing `find_hash_hex_span`, which looks for a different
-/// key literal and so deliberately cannot see this one. Both apply the same boundary.
-fn carries_subhash(raw: &str) -> bool {
-    let bytes = raw.as_bytes();
-    let mut from = 0usize;
-    while let Some(rel) = crate::markers::find_sub(&bytes[from..], b"subhash") {
-        let at = from + rel;
-        if at != 0 && !crate::markers::is_ws_byte(bytes[at - 1]) {
-            from = at + 1;
-            continue;
-        }
-        let mut j = at + 7;
-        while j < bytes.len() && crate::markers::is_ws_byte(bytes[j]) {
-            j += 1;
-        }
-        if j < bytes.len() && bytes[j] == b'=' {
-            j += 1;
-            while j < bytes.len() && crate::markers::is_ws_byte(bytes[j]) {
-                j += 1;
-            }
-            if bytes[j..].starts_with(b"sha256:")
-                && bytes.get(j + 7).is_some_and(u8::is_ascii_hexdigit)
-            {
-                return true;
-            }
-        }
-        from = at + 1;
-    }
-    false
 }
 
 /// Insert ` hash=sha256:{now}` immediately after the first `stay:<id>` token.
