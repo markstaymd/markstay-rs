@@ -9,8 +9,7 @@
 // (`hashlib`, `node:crypto`), so both cores are literally third-party-dep-free.
 // Rust std ships no SHA-256, so the choice is `sha2` (RustCrypto) vs vendoring.
 // We vendor (~120 LOC) to hold the zero-dependency line the project values and to
-// keep a future WASM artifact small and `no_std`-friendly (SPEC.md §8;
-// PLAN_RUST_IMPL.md "The one real asymmetry").
+// keep a future WASM artifact small and `no_std`-friendly (SPEC.md §8).
 //
 // Verified against the FIPS-180 vectors (empty -> e3b0c442..., "abc" ->
 // ba7816bf...) and the conformance corpus `hash.json` (tests/conformance.rs +

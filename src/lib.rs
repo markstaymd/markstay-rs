@@ -1,4 +1,4 @@
-//! markstay Rust reference implementation, public API (SPEC.md v1.6, parser-free
+//! markstay Rust reference implementation, public API (SPEC.md v1.7, parser-free
 //! core). Mirrors the JS reference surface (impl/js/src/index.js) and the Python
 //! reference (linter/markstay_lint.py and eval/attachment/{quote,resolver}.py).
 //!
@@ -6,9 +6,8 @@
 //! and the marker scanner is hand-rolled, so the crate pulls nothing for the core
 //! (serde_json is test-only). CommonMark mode (§5.2) is deferred from v1.
 //!
-//! `no_std` + `alloc`: the core links no `std`, only `alloc` (the WASM handover,
-//! HANDOVER_RUST_WASM.md, assumes this stays open). The CLI binary and the tests
-//! own `std`.
+//! `no_std` + `alloc`: the core links no `std`, only `alloc`, so a future WASM
+//! binding can reuse it. The CLI binary and the tests own `std`.
 
 #![no_std]
 
