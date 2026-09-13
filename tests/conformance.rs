@@ -507,7 +507,7 @@ fn corpus() {
     assert!(missing.is_empty(), "verifiers with no vectors in the corpus: {:?}", missing);
 
     assert_eq!(total, CORE_VECTORS, "core corpus vector count");
-    assert_eq!(declined, vec!["rows:31".to_string()], "declined optional profiles");
+    assert_eq!(declined, vec!["rows:32".to_string()], "declined optional profiles");
 
     let passed = total - failures.len();
     println!("\n{}/{} core corpus vectors pass ({} files)", passed, total, files.len());

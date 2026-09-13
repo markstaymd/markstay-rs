@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.7-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.8-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.7), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.8), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -34,7 +34,7 @@ those **optional**. Its mandatory compatibility layer is parser-free: an exact
 container hash, and is never reported as its containing block's stay. The Python
 reference implements child segmentation and resolution.
 
-**Write safety (§3.4, v1.7).** `stamp` inserts new markers on marker-only lines.
+**Write safety (§3.4, v1.8).** `stamp` inserts new markers on marker-only lines.
 It never emits a list-item or table-row carrier, and never relocates a table's
 container marker, so the carrier refusals in §3.4 and §5.6 cannot be reached here.
 Refreshing a hash or repairing an id keeps an existing same-line marker in place,
@@ -261,7 +261,7 @@ comparing with a 1e-9 float tolerance and identical key sets. **420/420 core
 corpus vectors pass** (180 hand-authored `spec/` + 240 generated `gen/`, 22 files),
 incl. every `seqmatch` vector (143, with non-BMP) to delta 0 and the `stamp`/`mint`
 write-path vectors shared with JS/Python. The optional `rows` profile (SPEC.md §5.6
-table-row identity and §3.4 carrier refusals, 31 vectors) is **declined**: §16 keeps
+table-row identity and §3.4 carrier refusals, 32 vectors) is **declined**: §16 keeps
 child segmentation optional and this implementation does not segment child blocks. The decline is
 asserted rather than implicit, so the test fails if the profile vanishes from the
 corpus, if its vector count changes, or if a profile it has never heard of turns
