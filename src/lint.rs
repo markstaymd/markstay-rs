@@ -163,6 +163,27 @@ fn id_index<'a>(blocks: &'a [Block]) -> Vec<(String, Vec<&'a Block>)> {
     out
 }
 
+/// Every well-formed marker on a content block as `(id, has_subhash)`, in
+/// document order. Lexical rather than attached-stay semantics: it answers
+/// "does any marker still carry this id", which is the §16 (v1.9) drop check for
+/// a child stay and needs no §5.5 or §5.6 segmentation. Orphan chunks are
+/// included: an orphan marker still carries its id, and the single-document
+/// lint reports the position as ORPHAN_MARKER.
+pub(crate) fn stay_marker_ids(blocks: &[Block]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for b in blocks {
+        for mk in &b.markers {
+            if mk.malformed {
+                continue;
+            }
+            if let Some(id) = &mk.id {
+                out.push((id.clone(), mk.has_subhash));
+            }
+        }
+    }
+    out
+}
+
 /// Regeneration diff (SPEC.md §11): what an edit did to the ids. Catches the
 /// AI-rewrite failure mode (dropped markers) plus duplication and exact-content
 /// relocation. Returns findings in detection order.
@@ -277,6 +298,33 @@ pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<
                     None,
                 ));
             }
+        }
+    }
+
+    // SPEC.md §16 (v1.9): a child stay is a stay, so its loss is reported too,
+    // under its own code so the reader rule holds (a `subhash` marker is never
+    // reported as its container's stay). Lexical: the id sat on exactly one
+    // marker in the baseline, that marker carried `subhash`, and no marker of
+    // any kind carries it after the edit.
+    let before_markers = stay_marker_ids(before_blocks);
+    let after_markers = stay_marker_ids(after_blocks);
+    for (mid, child) in &before_markers {
+        if !*child {
+            continue;
+        }
+        let count = before_markers.iter().filter(|(k, _)| k == mid).count();
+        if count == 1 && !after_markers.iter().any(|(k, _)| k == mid) {
+            findings.push(finding(
+                Level::Error,
+                "DROPPED_CHILD_ID",
+                format!(
+                    "child id {} was in the baseline but no marker carries it after the edit \
+                     (silent loss)",
+                    mid
+                ),
+                Some(mid.clone()),
+                None,
+            ));
         }
     }
     findings

@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.8-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.9-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.8), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.9), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -257,15 +257,15 @@ tests/
 
 `tests/conformance.rs` loads the shared corpus at `../../conformance` (spec/ then
 gen/ then the optional profile tiers, never tree/) and recomputes every vector,
-comparing with a 1e-9 float tolerance and identical key sets. **420/420 core
-corpus vectors pass** (180 hand-authored `spec/` + 240 generated `gen/`, 22 files),
+comparing with a 1e-9 float tolerance and identical key sets. **430/430 core
+corpus vectors pass** (190 hand-authored `spec/` + 240 generated `gen/`, 22 files),
 incl. every `seqmatch` vector (143, with non-BMP) to delta 0 and the `stamp`/`mint`
 write-path vectors shared with JS/Python. The optional `rows` profile (SPEC.md §5.6
 table-row identity and §3.4 carrier refusals, 32 vectors) is **declined**: §16 keeps
 child segmentation optional and this implementation does not segment child blocks. The decline is
 asserted rather than implicit, so the test fails if the profile vanishes from the
 corpus, if its vector count changes, or if a profile it has never heard of turns
-up. The `check` category carries 14 commit-shaped inputs and asserts baseline pairings,
+up. The `check` category carries 17 commit-shaped inputs and asserts baseline pairings,
 findings, moves, Markdown tracking departures, deletion notes, and scope. The
 `preserve` category is the odd one: it holds the §11 instruction as plain prose
 rather than a computation, so this crate's `const` copy cannot drift from the npm

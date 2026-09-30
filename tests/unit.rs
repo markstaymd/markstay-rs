@@ -155,6 +155,20 @@ fn diff_reports_a_dropped_id() {
 }
 
 #[test]
+fn diff_reports_a_lost_child_id_as_a_child_drop_not_a_container_stay() {
+    // SPEC.md §16 (v1.9): the item survives, only its marker went.
+    let before = "- alpha <!-- stay:c1 subhash=sha256:1122 -->\n- beta\n<!-- stay:list -->\n";
+    let after = "- alpha\n- beta\n<!-- stay:list -->\n";
+    let findings = lint_diff(before, after);
+    assert_eq!(ids_for(&findings, "DROPPED_CHILD_ID"), ["c1"]);
+    assert!(ids_for(&findings, "DROPPED_ID").is_empty());
+    assert!(has_errors(&findings));
+    // Carried by any marker after the edit, even a block one, it is not lost.
+    let kept = "- alpha\n- beta\n<!-- stay:list -->\n<!-- stay:c1 -->\n";
+    assert!(ids_for(&lint_diff(before, kept), "DROPPED_CHILD_ID").is_empty());
+}
+
+#[test]
 fn diff_reports_a_duplicated_id() {
     let before = "A.\n<!-- stay:a -->\n";
     let after = "A.\n<!-- stay:a -->\n\nCopy of A.\n<!-- stay:a -->\n";
@@ -190,8 +204,11 @@ fn diff_treats_an_in_place_edit_as_drift_not_relocation() {
 
 #[test]
 fn diff_ignores_child_ids_as_container_identity() {
+    // §16: the loss is reported as a child drop, never as the container's stay.
     let before = "Body.\n<!-- stay:child subhash=bogus -->\n";
-    assert!(lint_diff(before, "Body.\n").is_empty());
+    let findings = lint_diff(before, "Body.\n");
+    assert_eq!(codes_sorted(&findings), ["DROPPED_CHILD_ID"]);
+    assert_eq!(ids_for(&findings, "DROPPED_CHILD_ID"), ["child"]);
 }
 
 // --- resolver ladder (ported / adapted from test_attach.py) -----------------

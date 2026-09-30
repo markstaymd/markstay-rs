@@ -75,6 +75,13 @@ fn ids_of(text: Option<&str>) -> BTreeSet<String> {
     ids
 }
 
+/// Every id any marker carries, child markers included, so a child stay moved
+/// to another staged file is still in the commit (SPEC.md §16, v1.9). Only the
+/// move check reads this; baseline pairing stays on block ids.
+fn carried_by(text: &str) -> BTreeSet<String> {
+    crate::lint::stay_marker_ids(&parse_document(text)).into_iter().map(|(id, _)| id).collect()
+}
+
 /// Check commit-shaped entries without reading Git or the filesystem.
 ///
 /// `scope` narrows reports only. The full input still participates in baseline
@@ -103,8 +110,12 @@ pub fn check_entries(entries: &[CommitEntry<'_>], scope: &[String]) -> StagedChe
         .iter()
         .map(|entry| (entry.destination, ids_of(Some(entry.after.unwrap_or("")))))
         .collect();
+    let staged_carried: Vec<(&str, BTreeSet<String>)> = changed
+        .iter()
+        .map(|entry| (entry.destination, carried_by(entry.after.unwrap_or(""))))
+        .collect();
     let mut committed_ids = BTreeSet::new();
-    for (_, ids) in &staged_ids {
+    for (_, ids) in &staged_carried {
         committed_ids.extend(ids.iter().cloned());
     }
 
@@ -159,15 +170,17 @@ pub fn check_entries(entries: &[CommitEntry<'_>], scope: &[String]) -> StagedChe
 
         let mut kept = Vec::new();
         for finding in findings {
-            let moved = finding.code == "DROPPED_ID"
-                && finding.id.as_ref().map(|id| committed_ids.contains(id)).unwrap_or(false);
+            // A move needs another staged file carrying the id: this file's own
+            // markers never excuse a drop reported against it.
+            let id = finding.id.as_deref().unwrap_or("");
+            let elsewhere: BTreeSet<String> = staged_carried
+                .iter()
+                .filter(|(path, ids)| *path != entry.destination && ids.contains(id))
+                .map(|(path, _)| (*path).to_string())
+                .collect();
+            let moved = (finding.code == "DROPPED_ID" || finding.code == "DROPPED_CHILD_ID")
+                && !elsewhere.is_empty();
             if moved {
-                let id = finding.id.as_deref().unwrap_or("");
-                let elsewhere: BTreeSet<String> = staged_ids
-                    .iter()
-                    .filter(|(path, ids)| *path != entry.destination && ids.contains(id))
-                    .map(|(path, _)| (*path).to_string())
-                    .collect();
                 result.notes.push(format!(
                     "{}: moved out of {} into {} (still in this commit, not blocking)",
                     id,
