@@ -34,7 +34,7 @@ fn same_marker_facts(left: &Marker, right: &Marker) -> bool {
         && left.malformed == right.malformed
 }
 
-fn document_marker_records(md: &str, normalized: &str, text: &str) -> Vec<MarkerRecord> {
+pub(crate) fn document_marker_records(md: &str, normalized: &str, text: &str) -> Vec<MarkerRecord> {
     let frontmatter_lines: BTreeSet<usize> = normalized
         .split('\n')
         .zip(text.split('\n'))
@@ -59,7 +59,7 @@ fn document_marker_records(md: &str, normalized: &str, text: &str) -> Vec<Marker
     normalized_records
 }
 
-fn line_starts(text: &str) -> Vec<usize> {
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     starts.push(0);
     for (index, byte) in text.bytes().enumerate() {
@@ -70,7 +70,11 @@ fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-fn strip_record_ranges(text: &str, records: &[MarkerRecord], source_start: usize) -> String {
+pub(crate) fn strip_record_ranges<'a>(
+    text: &str,
+    records: impl IntoIterator<Item = &'a MarkerRecord>,
+    source_start: usize,
+) -> String {
     let source_end = source_start + text.len();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for record in records {

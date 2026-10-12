@@ -125,11 +125,11 @@ const VERIFIED_CATEGORIES: &[&str] = &[
 //
 // SPEC.md §16 keeps §5.5 and §5.6 child segmentation OPTIONAL, and only the
 // Python reference implements it, so declining `rows` is conforming. Running
-// 429 of the 430 core vectors would not be, which is why the core count is
+// 468 of the 469 core vectors would not be, which is why the core count is
 // asserted rather than left to whatever happens to be on disk.
 const KNOWN_PROFILES: &[&str] = &["rows"];
 const ADVERTISED_PROFILES: &[&str] = &[];
-const CORE_VECTORS: usize = 430;
+const CORE_VECTORS: usize = 469;
 
 fn verify(category: &str, v: &Value) -> (Value, Value) {
     match category {

@@ -8,10 +8,12 @@
 // code,line) findings retain document order after the stable sort, matching the
 // other runners on the `diff` corpus.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::adoption::adopted_ids;
 use crate::hash::body_hash;
 use crate::parse::{parse_document, Block};
 
@@ -188,12 +190,26 @@ pub(crate) fn stay_marker_ids(blocks: &[Block]) -> Vec<(String, bool)> {
 /// AI-rewrite failure mode (dropped markers) plus duplication and exact-content
 /// relocation. Returns findings in detection order.
 pub fn lint_diff(before_md: &str, after_md: &str) -> Vec<Finding> {
-    lint_diff_blocks(&parse_document(before_md), &parse_document(after_md))
+    diff_blocks(&parse_document(before_md), &parse_document(after_md), &|gone| {
+        adopted_ids(before_md, after_md, gone)
+    })
 }
 
 /// Regeneration diff over two pre-segmented block lists (the segmentation-neutral
-/// core of [`lint_diff`]).
+/// core of [`lint_diff`]). Blocks carry no source, so SPEC.md §16's (v1.10)
+/// in-place adoption test, which reads it, is not applied: every id it would
+/// keep is reported dropped.
 pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<Finding> {
+    diff_blocks(before_blocks, after_blocks, &|_| BTreeSet::new())
+}
+
+/// `adopted` answers the §16 (v1.10) in-place adoption test for the ids that
+/// would otherwise be dropped.
+fn diff_blocks(
+    before_blocks: &[Block],
+    after_blocks: &[Block],
+    adopted: &dyn Fn(&[String]) -> BTreeSet<String>,
+) -> Vec<Finding> {
     let before_idx = id_index(before_blocks);
     // before: ids with exactly one block, in first-seen order.
     let before: Vec<(String, &Block)> =
@@ -205,9 +221,30 @@ pub fn lint_diff_blocks(before_blocks: &[Block], after_blocks: &[Block]) -> Vec<
     let before_get = |id: &str| before.iter().find(|(k, _)| k == id).map(|(_, b)| *b);
     let after_get = |id: &str| after.iter().find(|(k, _)| k == id).map(|(_, v)| v);
 
-    // DROPPED: in baseline, gone after.
-    for (mid, _) in &before {
-        if after_get(mid).is_none() {
+    // DROPPED: in baseline, gone after. SPEC.md §16 (v1.10): a block stay
+    // rewritten in place as its list item's child stay is kept, and said so:
+    // the test is lexical, so a shape it misjudges is printed rather than
+    // passed in silence.
+    let gone: Vec<String> = before
+        .iter()
+        .filter(|(mid, _)| after_get(mid).is_none())
+        .map(|(mid, _)| mid.clone())
+        .collect();
+    let kept = if gone.is_empty() { BTreeSet::new() } else { adopted(&gone) };
+    for mid in gone {
+        if kept.contains(&mid) {
+            findings.push(finding(
+                Level::Warn,
+                "ADOPTED_ID",
+                format!(
+                    "id {} was rewritten in place as a child stay and is kept; \
+                     check it sits on the list item it names",
+                    mid
+                ),
+                Some(mid.clone()),
+                None,
+            ));
+        } else {
             findings.push(finding(
                 Level::Error,
                 "DROPPED_ID",

@@ -1,4 +1,4 @@
-//! markstay Rust reference implementation, public API (SPEC.md v1.9, parser-free
+//! markstay Rust reference implementation, public API (SPEC.md v1.10, parser-free
 //! core). Mirrors the JS reference surface (impl/js/src/index.js) and the Python
 //! reference (linter/markstay_lint.py and eval/attachment/{quote,resolver}.py).
 //!
@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod adoption;
 pub mod code;
 pub mod hash;
 pub mod id;
@@ -46,6 +47,7 @@ pub use stamp::{
     DEFAULT_HASH_LENGTH,
 };
 
+pub use adoption::adopted_ids;
 pub use lint::{
     has_errors, lint_blocks, lint_diff, lint_diff_blocks, lint_document, sort_findings, Finding,
     Level,
