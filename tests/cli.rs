@@ -487,3 +487,31 @@ fn check_json_uses_stdout_and_is_valid() {
     assert!(payload["findings"]["a.md"].is_array());
     assert!(payload["notes"].is_array());
 }
+
+#[test]
+fn stamp_names_a_refused_frontmatter_shaped_span_on_stderr_and_exits_zero() {
+    let shaped = tmp_md("fm-span", "---\nname: demo\n\ndescription: two\n---\n\nBody text.\n");
+    let plain = tmp_md("fm-plain", "Body.\n");
+    let run = |p: &PathBuf| {
+        Command::new(env!("CARGO_BIN_EXE_markstay"))
+            .args(["stamp", p.to_str().unwrap()])
+            .output()
+            .expect("spawn markstay binary")
+    };
+    let out = run(&shaped);
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let f = shaped.display();
+    assert!(err.contains(&format!("{f}: 1 id(s) minted\n")), "{err}");
+    assert!(
+        err.contains(&format!(
+            "{f}: frontmatter-shaped span L1-L5 refused under §5.3, left unstamped\n"
+        )),
+        "{err}"
+    );
+    let out = run(&plain);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!String::from_utf8(out.stderr).unwrap().contains("frontmatter-shaped"));
+    let _ = fs::remove_file(&shaped);
+    let _ = fs::remove_file(&plain);
+}

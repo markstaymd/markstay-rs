@@ -124,12 +124,12 @@ const VERIFIED_CATEGORIES: &[&str] = &[
 // pass as silence.
 //
 // SPEC.md §16 keeps §5.5 and §5.6 child segmentation OPTIONAL, and only the
-// Python reference implements it, so declining `rows` is conforming. Running
-// 468 of the 469 core vectors would not be, which is why the core count is
-// asserted rather than left to whatever happens to be on disk.
-const KNOWN_PROFILES: &[&str] = &["rows"];
+// Python reference implements it, so declining `items` and `rows` is
+// conforming. Running 530 of the 531 core vectors would not be, which is why the
+// core count is asserted rather than left to whatever happens to be on disk.
+const KNOWN_PROFILES: &[&str] = &["rows", "items"];
 const ADVERTISED_PROFILES: &[&str] = &[];
-const CORE_VECTORS: usize = 469;
+const CORE_VECTORS: usize = 531;
 
 fn verify(category: &str, v: &Value) -> (Value, Value) {
     match category {
@@ -507,7 +507,11 @@ fn corpus() {
     assert!(missing.is_empty(), "verifiers with no vectors in the corpus: {:?}", missing);
 
     assert_eq!(total, CORE_VECTORS, "core corpus vector count");
-    assert_eq!(declined, vec!["rows:32".to_string()], "declined optional profiles");
+    assert_eq!(
+        declined,
+        vec!["items:9".to_string(), "rows:32".to_string()],
+        "declined optional profiles"
+    );
 
     let passed = total - failures.len();
     println!("\n{}/{} core corpus vectors pass ({} files)", passed, total, files.len());

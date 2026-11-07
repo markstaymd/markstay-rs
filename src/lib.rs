@@ -1,4 +1,4 @@
-//! markstay Rust reference implementation, public API (SPEC.md v1.10, parser-free
+//! markstay Rust reference implementation, public API (SPEC.md v1.11, parser-free
 //! core). Mirrors the JS reference surface (impl/js/src/index.js) and the Python
 //! reference (linter/markstay_lint.py and eval/attachment/{quote,resolver}.py).
 //!
@@ -42,8 +42,8 @@ pub use segment::segment_blank_line;
 
 pub use id::{is_id_charset, mint_id, DEFAULT_ALPHABET, DEFAULT_ID_LENGTH};
 pub use stamp::{
-    format_attr_value, format_marker, repair_duplicates, restamp, stamp, FormatError, Minted,
-    Renamed, RepairResult, RestampOptions, RestampResult, StampOptions, StampResult,
+    format_attr_value, format_marker, repair_duplicates, restamp, stamp, FormatError, LineSpan,
+    Minted, Renamed, RepairResult, RestampOptions, RestampResult, StampOptions, StampResult,
     DEFAULT_HASH_LENGTH,
 };
 
@@ -56,13 +56,13 @@ pub use lint::{
 pub use ratio::{matching_blocks, ratio};
 
 pub use quote::{
-    best_match, body_score, context_bonus, normalize, quote_ratio, BestMatch, Selector,
-    CONTEXT_CHARS,
+    best_match, body_score, context_bonus, normalize, quote_ratio, rank_matches, BestMatch,
+    Selector, CONTEXT_CHARS,
 };
 
 pub use resolve::{
-    build_anchors, build_anchors_from_blocks, resolve, resolve_over_blocks, Anchor, Resolution,
-    DEFAULT_MARGIN, DEFAULT_THRESHOLD,
+    build_anchors, build_anchors_from_blocks, disjoint_in, resolve, resolve_over_blocks, Anchor,
+    Resolution, DEFAULT_MARGIN, DEFAULT_THRESHOLD, MERGE_CONTENDER_CAP,
 };
 
 pub use preserve::{preserve_wrap, PRESERVE_INSTRUCTION, PRESERVE_RETURN_ONLY};

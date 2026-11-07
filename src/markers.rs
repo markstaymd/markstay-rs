@@ -213,6 +213,90 @@ fn parse_body(body: &str) -> Option<ParsedBody> {
     Some(ParsedBody { id, id_end, attributes })
 }
 
+#[derive(Clone, Copy)]
+enum BodyState {
+    Start,
+    Id,
+    Separator,
+    Key,
+    Value,
+    Bare,
+    Quoted,
+    Escape,
+    AfterQuote,
+}
+
+impl BodyState {
+    fn next(self, byte: u8) -> Option<Self> {
+        use BodyState::*;
+        match self {
+            Start if is_id_byte(byte) => Some(Id),
+            Id if is_id_byte(byte) => Some(Id),
+            Id | Bare | AfterQuote if is_ws_byte(byte) => Some(Separator),
+            Separator if is_ws_byte(byte) => Some(Separator),
+            Separator if is_key_start(byte) => Some(Key),
+            Key if is_id_byte(byte) => Some(Key),
+            Key if byte == b'=' => Some(Value),
+            Value if byte == b'"' => Some(Quoted),
+            Value | Bare if byte != b'"' && (0x21..=0x7e).contains(&byte) => Some(Bare),
+            Quoted if byte == b'"' => Some(AfterQuote),
+            Quoted if byte == b'\\' => Some(Escape),
+            Quoted if byte == b'\n' || (0x20..=0x7e).contains(&byte) => Some(Quoted),
+            Escape if matches!(byte, b'\\' | b'"') => Some(Quoted),
+            _ => None,
+        }
+    }
+
+    fn accepts_end(self) -> bool {
+        matches!(self, Self::Id | Self::Separator | Self::Bare | Self::AfterQuote)
+    }
+}
+
+/// Candidates of one host syntax share a first closer until their starts pass
+/// it. Memoize grammar validity for that interval before allocating attributes:
+/// each (byte position, grammar state) is visited at most once, even when many
+/// overlapping candidates would otherwise reparse the same failing suffix.
+#[derive(Default)]
+struct BodyValidity {
+    close: Option<usize>,
+    start: usize,
+    cache: Vec<[u8; 9]>,
+}
+
+impl BodyValidity {
+    fn accepts(&mut self, text: &[u8], start: usize, close: usize) -> bool {
+        if self.close != Some(close) {
+            self.close = Some(close);
+            self.start = start;
+            self.cache.clear();
+            self.cache.resize(close - start + 1, [0; 9]);
+        }
+        let mut pos = start;
+        let mut state = BodyState::Start;
+        let mut path = Vec::new();
+        let accepted = loop {
+            let index = pos - self.start;
+            let cached = self.cache[index][state as usize];
+            if cached != 0 {
+                break cached == 2;
+            }
+            #[cfg(test)]
+            body_validity_tests::VISITS.with(|visits| visits.set(visits.get() + 1));
+            path.push((index, state));
+            if pos == close {
+                break state.accepts_end();
+            }
+            let Some(next) = state.next(text[pos]) else { break false };
+            state = next;
+            pos += 1;
+        };
+        for (index, state) in path {
+            self.cache[index][state as usize] = if accepted { 2 } else { 1 };
+        }
+        accepted
+    }
+}
+
 fn malformed_key_first(body: &str) -> bool {
     let bytes = body.as_bytes();
     if !bytes.starts_with(b"stay:") || !bytes.get(5).is_some_and(|b| is_key_start(*b)) {
@@ -243,9 +327,42 @@ pub(crate) struct MarkerRecord {
     pub(crate) marker: Marker,
 }
 
-fn next_opener(text: &[u8], from: usize) -> Option<(usize, Syntax, usize)> {
-    let html = find_sub(&text[from..], b"<!--").map(|n| from + n);
-    let mdx = find_sub(&text[from..], b"{/*").map(|n| from + n);
+/// `find_sub` from a position over one text, reusing the last answer while it
+/// still holds. Every marker searches forward for each opener and closer, and a
+/// needle that is far away or absent would otherwise be rescanned to the end per
+/// marker.
+struct ForwardFind<'a> {
+    text: &'a [u8],
+    needle: &'static [u8],
+    from: usize,
+    at: Option<usize>,
+}
+
+impl<'a> ForwardFind<'a> {
+    fn new(text: &'a [u8], needle: &'static [u8]) -> Self {
+        ForwardFind { text, needle, from: usize::MAX, at: None }
+    }
+
+    fn find(&mut self, query: usize) -> Option<usize> {
+        if query < self.from || self.at.is_some_and(|at| query > at) {
+            self.from = query;
+            self.at = find_sub(&self.text[query..], self.needle).map(|n| query + n);
+        }
+        self.at
+    }
+}
+
+struct Finders<'a> {
+    html: ForwardFind<'a>,
+    mdx: ForwardFind<'a>,
+    html_close: ForwardFind<'a>,
+    html_parse_error_close: ForwardFind<'a>,
+    mdx_close: ForwardFind<'a>,
+}
+
+fn next_opener(find: &mut Finders, from: usize) -> Option<(usize, Syntax, usize)> {
+    let html = find.html.find(from);
+    let mdx = find.mdx.find(from);
     match (html, mdx) {
         (None, None) => None,
         (Some(start), None) => Some((start, Syntax::Html, 4)),
@@ -255,16 +372,21 @@ fn next_opener(text: &[u8], from: usize) -> Option<(usize, Syntax, usize)> {
     }
 }
 
-fn host_close(text: &[u8], syntax: Syntax, from: usize) -> Option<(usize, usize, bool)> {
+fn host_close(
+    text: &[u8],
+    find: &mut Finders,
+    syntax: Syntax,
+    from: usize,
+) -> Option<(usize, usize, bool)> {
     match syntax {
         Syntax::Mdx => {
-            let start = from + find_sub(&text[from..], b"*/")?;
+            let start = find.mdx_close.find(from)?;
             let valid = text.get(start + 2) == Some(&b'}');
             Some((start, start + if valid { 3 } else { 2 }, valid))
         }
         Syntax::Html => {
-            let ordinary = find_sub(&text[from..], b"-->").map(|n| from + n);
-            let parse_error = find_sub(&text[from..], b"--!>").map(|n| from + n);
+            let ordinary = find.html_close.find(from);
+            let parse_error = find.html_parse_error_close.find(from);
             match (ordinary, parse_error) {
                 (None, None) => None,
                 (Some(start), None) => Some((start, start + 3, true)),
@@ -280,9 +402,21 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
     let view = normalized_view(text);
     let normalized = view.text.as_bytes();
     let mut records = Vec::new();
+    // Openers arrive in source order, so the line count advances with them.
+    let mut newlines = 0usize;
+    let mut counted_to = 0usize;
+    let mut find = Finders {
+        html: ForwardFind::new(normalized, b"<!--"),
+        mdx: ForwardFind::new(normalized, b"{/*"),
+        html_close: ForwardFind::new(normalized, b"-->"),
+        html_parse_error_close: ForwardFind::new(normalized, b"--!>"),
+        mdx_close: ForwardFind::new(normalized, b"*/"),
+    };
+    let mut html_validity = BodyValidity::default();
+    let mut mdx_validity = BodyValidity::default();
     let mut cursor = 0usize;
     while cursor < normalized.len() {
-        let Some((open_start, syntax, open_len)) = next_opener(normalized, cursor) else { break };
+        let Some((open_start, syntax, open_len)) = next_opener(&mut find, cursor) else { break };
         let mut body_start = open_start + open_len;
         while normalized.get(body_start).is_some_and(|b| is_ws_byte(*b)) {
             body_start += 1;
@@ -292,13 +426,21 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
             continue;
         }
         let Some((close_start, close_end, close_valid)) =
-            host_close(normalized, syntax, body_start + 5)
+            host_close(normalized, &mut find, syntax, body_start + 5)
         else {
             cursor = open_start + 1;
             continue;
         };
         let body = &view.text[body_start..close_start];
-        let parsed = if close_valid { parse_body(body) } else { None };
+        let validity = match syntax {
+            Syntax::Html => &mut html_validity,
+            Syntax::Mdx => &mut mdx_validity,
+        };
+        let parsed = if close_valid && validity.accepts(normalized, body_start + 5, close_start) {
+            parse_body(body)
+        } else {
+            None
+        };
         let malformed = parsed.is_none() && malformed_key_first(body);
         if parsed.is_none() && !malformed {
             cursor = open_start + 1;
@@ -340,8 +482,8 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
                 }
             }
         }
-        let line =
-            line_offset + normalized[..open_start].iter().filter(|&&b| b == b'\n').count() + 1;
+        newlines += normalized[counted_to..open_start].iter().filter(|&&b| b == b'\n').count();
+        counted_to = open_start;
         let marker = Marker {
             id: parsed.as_ref().map(|p| p.id.clone()),
             hash: block_hash,
@@ -349,7 +491,7 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
             has_subhash,
             raw: text[raw_start..raw_end].to_string(),
             syntax,
-            line,
+            line: line_offset + (newlines + 1),
             malformed,
             stay_span,
             hash_span,
@@ -437,4 +579,29 @@ pub(crate) fn find_stay_span(s: &str) -> Option<(usize, usize)> {
 
 pub(crate) fn find_hash_hex_span(s: &str) -> Option<(usize, usize, usize)> {
     scan_marker_records(s, 0).into_iter().next()?.marker.hash_span
+}
+
+#[cfg(test)]
+mod body_validity_tests {
+    extern crate std;
+
+    use core::cell::Cell;
+
+    std::thread_local! {
+        pub(super) static VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn overlapping_rejections_visit_each_state_position_at_most_once() {
+        for (opener, closer) in [("<!--stay:", "-->"), ("{/*stay:", "*/}")] {
+            let prefix = alloc::format!("{opener}x a=");
+            let text = prefix.repeat(4000) + "\n" + closer;
+            VISITS.with(|visits| visits.set(0));
+            assert!(super::find_markers(&text, 0).is_empty());
+            let visits = VISITS.with(Cell::get);
+            // The lower bound confirms that instrumentation is live. Thread
+            // local counts isolate this scan from Rust's parallel test runner.
+            assert!(visits >= text.len() && visits <= 9 * text.len(), "{visits} state visits");
+        }
+    }
 }

@@ -115,8 +115,13 @@ fn is_yamlish_line(ln: &str) -> bool {
 /// setext heading under one. Both satisfy all four conditions and their content *is*
 /// excluded. Frontmatter wins, the same call every mainstream site generator makes.
 /// A document that fails any of the four conditions falls through to ordinary
-/// Markdown, where the worst case is that frontmatter is not skipped (a stray
-/// hash-drift warning) rather than content being silently discarded.
+/// Markdown. For a reader the worst case is that frontmatter is not skipped (a
+/// stray hash-drift warning) rather than content being silently discarded. For a
+/// writer it is worse, and one shape is refused rather than written: a span that
+/// fails condition 3 only for a blank line while condition 4 holds is still YAML to
+/// every tool that reads frontmatter, and a marker stamped into it breaks that
+/// YAML. See [`frontmatter_write_refusal`], which leaves this function, and so
+/// recognition, unchanged.
 ///
 /// Lines are replaced one-for-one with empty lines, so every line number the caller
 /// reports is unchanged. Crate-internal: not part of the public API.
@@ -149,6 +154,44 @@ pub(crate) fn blank_frontmatter(text: &str) -> Cow<'_, str> {
         return Cow::Owned(out);
     }
     Cow::Borrowed(text)
+}
+
+/// The last line of a leading span a writer must not write into (SPEC.md §5.3,
+/// v1.11), or `None`. `text` is LF-normalized. Port of `frontmatter_write_refusal`
+/// from impl/py/src/markstay/lint.py.
+///
+/// The span is one [`blank_frontmatter`] rejects, so readers segment it as ordinary
+/// Markdown, and rejects only on condition 3 for a blank line: line 1 opens, the
+/// first later `---` or `...` line closes, the payload between them holds a blank
+/// line, and at least one payload line is YAML-ish (condition 4). That is the shape
+/// of real YAML with a blank line in it, which a frontmatter reader still parses,
+/// and a marker stamped on lines 1 to n breaks it there. So `stamp` inserts no
+/// marker on lines 1 to n and mints no stay for a block that starts on them.
+///
+/// Nothing reads this answer back: recognition, segmentation and every reader are
+/// unchanged, and only `stamp` consults it. Prose that looks like a key
+/// (`Note: this.`) between two thematic breaks with blank lines around it is
+/// refused too, which costs a stay and breaks nothing. Crate-internal: `stamp`
+/// reports the span as `StampResult::refused_frontmatter`.
+pub(crate) fn frontmatter_write_refusal(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.first().is_none_or(|ln| !is_frontmatter_open(ln)) {
+        return None;
+    }
+    for i in 1..lines.len() {
+        if !is_frontmatter_close(lines[i]) {
+            continue;
+        }
+        let payload = &lines[1..i];
+        if !payload.iter().any(|ln| is_ascii_blank_line(ln)) {
+            return None;
+        }
+        if !payload.iter().any(|ln| is_yamlish_line(ln)) {
+            return None;
+        }
+        return Some(i + 1);
+    }
+    None
 }
 
 /// Split `text` into blocks: a block is a maximal run of non-blank lines bounded

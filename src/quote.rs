@@ -1,5 +1,6 @@
 // Quote / selector recovery scoring (SPEC.md §9). Port of impl/js/src/quote.js
-// (`normalize`, `quoteRatio`, `bodyScore`, `contextBonus`, `bestMatch`), which
+// (`normalize`, `quoteRatio`, `bodyScore`, `contextBonus`, `rankMatches`,
+// `bestMatch`), which
 // ports eval/attachment/quote.py.
 
 use alloc::string::String;
@@ -88,19 +89,22 @@ fn clamp_one(x: f64) -> f64 {
 /// Exact containment floors the score at the length ratio of shorter to longer,
 /// so a surviving half of a split paragraph cannot score arbitrarily low.
 pub fn body_score(sel: &Selector, candidate: &str) -> f64 {
-    let q = normalize(&sel.quote);
-    let c = normalize(candidate);
+    body_score_normalized(&normalize(&sel.quote), &normalize(candidate))
+}
+
+/// [`body_score`] over two bodies already passed through [`normalize`].
+pub(crate) fn body_score_normalized(q: &str, c: &str) -> f64 {
     if q.is_empty() || c.is_empty() {
         return 0.0;
     }
     if q == c {
         return 1.0;
     }
-    let mut base = quote_ratio(&q, &c);
-    let lq = cp_len(&q);
-    let lc = cp_len(&c);
-    let (short, long, ls, ll) = if lq <= lc { (&q, &c, lq, lc) } else { (&c, &q, lc, lq) };
-    if !short.is_empty() && long.contains(short.as_str()) {
+    let mut base = quote_ratio(q, c);
+    let lq = cp_len(q);
+    let lc = cp_len(c);
+    let (short, long, ls, ll) = if lq <= lc { (q, c, lq, lc) } else { (c, q, lc, lq) };
+    if !short.is_empty() && long.contains(short) {
         let containment = ls as f64 / ll as f64;
         if containment > base {
             base = containment;
@@ -128,10 +132,14 @@ pub fn context_bonus(sel: &Selector, prev_text: &str, next_text: &str) -> f64 {
     bonus
 }
 
-/// Rank candidate block bodies against a selector. On an exact score tie the
-/// later candidate wins (sort `(score, index)` descending), and the score
-/// ceiling is 1.0. An empty candidate list returns `{ index: -1, .. }`.
-pub fn best_match(sel: &Selector, candidates: &[String]) -> BestMatch {
+/// Every candidate block body ranked against a selector, best first, as
+/// `(score, index)` pairs. A candidate's context bonus reads its physical
+/// neighbours in `candidates`, so a caller that ranks a subset (SPEC.md §9.1's
+/// carriers, or the unclaimed blocks) filters this list rather than re-ranking a
+/// shorter one. Scores are not clamped here: the ceiling of 1.0 applies to what
+/// a caller reports and compares, as in [`best_match`]. On an exact score tie
+/// the later candidate ranks first (sort `(score, index)` descending).
+pub fn rank_matches(sel: &Selector, candidates: &[String]) -> Vec<(f64, usize)> {
     let n = candidates.len();
     let mut scored: Vec<(f64, usize)> = Vec::with_capacity(n);
     for i in 0..n {
@@ -140,13 +148,20 @@ pub fn best_match(sel: &Selector, candidates: &[String]) -> BestMatch {
         let next = if i + 1 < n { candidates[i + 1].as_str() } else { "" };
         scored.push((s + context_bonus(sel, prev, next), i));
     }
-    if scored.is_empty() {
-        return BestMatch { index: -1, score: 0.0, runner_up: 0.0 };
-    }
-    // Sort (score, index) descending: an exact tie picks the later candidate.
     scored.sort_by(|x, y| {
         y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal).then(y.1.cmp(&x.1))
     });
+    scored
+}
+
+/// Rank candidate block bodies against a selector. On an exact score tie the
+/// later candidate wins (sort `(score, index)` descending), and the score
+/// ceiling is 1.0. An empty candidate list returns `{ index: -1, .. }`.
+pub fn best_match(sel: &Selector, candidates: &[String]) -> BestMatch {
+    let scored = rank_matches(sel, candidates);
+    if scored.is_empty() {
+        return BestMatch { index: -1, score: 0.0, runner_up: 0.0 };
+    }
     let (best_score, best_index) = scored[0];
     let runner_up = if scored.len() > 1 { scored[1].0 } else { 0.0 };
     BestMatch {

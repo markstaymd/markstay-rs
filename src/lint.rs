@@ -8,7 +8,7 @@
 // code,line) findings retain document order after the stable sort, matching the
 // other runners on the `diff` corpus.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -16,6 +16,16 @@ use alloc::vec::Vec;
 use crate::adoption::adopted_ids;
 use crate::hash::body_hash;
 use crate::parse::{parse_document, Block};
+use crate::quote::{body_score_normalized, normalize};
+
+/// SPEC.md §11 (v1.11): a kept id has moved off its block when its current
+/// block scores under `RELOCATED_BELOW` against its old text and exactly one
+/// block in the run of free blocks directly above it scores `RELOCATED_AT` or
+/// more against that text. A block is free when it carries no block stay id
+/// present in both documents.
+pub const RELOCATED_BELOW: f64 = 0.5;
+/// See [`RELOCATED_BELOW`].
+pub const RELOCATED_AT: f64 = 0.8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
@@ -186,9 +196,109 @@ pub(crate) fn stay_marker_ids(blocks: &[Block]) -> Vec<(String, bool)> {
     out
 }
 
+/// The after-edit content blocks, each marked free or owned. A block carrying
+/// a kept id is that id's, so it is never another id's surviving text, and it
+/// ends the window above any block below it. Every block stay id on an
+/// after-edit content block is in the after index, so "present in both"
+/// reduces to "present in the baseline". Bodies are hashed and normalized on
+/// first use.
+struct Window<'a> {
+    blocks: Vec<&'a Block>,
+    at: BTreeMap<usize, usize>, // block address -> position in `blocks`
+    owned: Vec<bool>,
+    before_hashes: BTreeMap<String, usize>, // baseline content blocks per body hash
+    hashes: Vec<Option<String>>,
+    norms: Vec<Option<String>>,
+}
+
+impl<'a> Window<'a> {
+    fn new(
+        before_idx: &[(String, Vec<&Block>)],
+        before_blocks: &[Block],
+        after_blocks: &'a [Block],
+    ) -> Self {
+        let baseline: BTreeSet<&str> = before_idx.iter().map(|(k, _)| k.as_str()).collect();
+        let blocks: Vec<&Block> = after_blocks.iter().filter(|b| b.index >= 0).collect();
+        let at = blocks.iter().enumerate().map(|(i, b)| (*b as *const Block as usize, i)).collect();
+        let owned = blocks
+            .iter()
+            .map(|b| {
+                b.markers.iter().any(|mk| {
+                    mk.is_block_stay() && mk.id.as_deref().is_some_and(|id| baseline.contains(id))
+                })
+            })
+            .collect();
+        let mut before_hashes: BTreeMap<String, usize> = BTreeMap::new();
+        for b in before_blocks.iter().filter(|b| b.index >= 0 && !b.content.is_empty()) {
+            *before_hashes.entry(body_hash(&b.content, None)).or_insert(0) += 1;
+        }
+        let hashes = alloc::vec![None; blocks.len()];
+        let norms = alloc::vec![None; blocks.len()];
+        Window { blocks, at, owned, before_hashes, hashes, norms }
+    }
+
+    /// Counts the candidates directly above `block` whose normalized body
+    /// satisfies `hit`, stopping once the count passes one. A candidate is a
+    /// free block between `block` and the nearest block above carrying a kept
+    /// id, unless it is unchanged from a baseline block other than the one
+    /// `old` names: that block was there before the edit, so the edit did not
+    /// strand it.
+    fn hits_above(&mut self, block: &Block, old: &str, hit: impl Fn(&str) -> bool) -> usize {
+        let own = body_hash(old, None);
+        let mut i = self.at[&(block as *const Block as usize)];
+        let mut hits = 0;
+        while i > 0 && !self.owned[i - 1] {
+            i -= 1;
+            if self.blocks[i].content.is_empty() {
+                continue;
+            }
+            let h = self.hashes[i].get_or_insert_with(|| body_hash(&self.blocks[i].content, None));
+            let seen = self.before_hashes.get(h.as_str()).copied().unwrap_or(0);
+            if seen > usize::from(*h == own) {
+                continue;
+            }
+            let body = self.norms[i].get_or_insert_with(|| normalize(&self.blocks[i].content));
+            if hit(body) {
+                hits += 1;
+                if hits > 1 {
+                    break;
+                }
+            }
+        }
+        hits
+    }
+}
+
+/// SPEC.md §11's relocation test for a kept id whose block changed: (1) its
+/// current block scores under [`RELOCATED_BELOW`] against the old text, by §9's
+/// body score without context; (2) exactly one candidate in the run of free
+/// blocks directly above the current block scores [`RELOCATED_AT`] or more
+/// against the old text, where a block unchanged from another baseline block is
+/// not a candidate; (3) the current block's normalized text is not inside the
+/// old text, so typing a blank line into a paragraph (the marker stays on a
+/// short tail) is drift, not relocation. The window is the shape the rule names, a block
+/// inserted between another block and its trailing marker. Each free block sits
+/// in the run above at most one block, so the scan costs at most the free
+/// blocks times the most kept ids any one block carries: linear while ids sit
+/// one to a block, and quadratic when an edit piles every marker onto one block.
+/// `window` yields the window, built on first use.
+fn moved_off<'w, 'a: 'w>(
+    old: &str,
+    block: &Block,
+    window: impl FnOnce() -> &'w mut Window<'a>,
+) -> bool {
+    let q = normalize(old);
+    let c = normalize(&block.content);
+    if body_score_normalized(&q, &c) >= RELOCATED_BELOW || q.contains(c.as_str()) {
+        return false;
+    }
+    window().hits_above(block, old, |f| body_score_normalized(&q, f) >= RELOCATED_AT) == 1
+}
+
 /// Regeneration diff (SPEC.md §11): what an edit did to the ids. Catches the
-/// AI-rewrite failure mode (dropped markers) plus duplication and exact-content
-/// relocation. Returns findings in detection order.
+/// AI-rewrite failure mode (dropped markers) plus duplication and relocation:
+/// an exact swap, or an id moved off its block (v1.11). Returns findings in
+/// detection order.
 pub fn lint_diff(before_md: &str, after_md: &str) -> Vec<Finding> {
     diff_blocks(&parse_document(before_md), &parse_document(after_md), &|gone| {
         adopted_ids(before_md, after_md, gone)
@@ -298,6 +408,8 @@ fn diff_blocks(
         }
     }
 
+    let mut window: Option<Window> = None; // built on the first drifted id that needs it
+
     for (mid, blks) in &after {
         if !before_has(mid) || blks.len() != 1 {
             continue;
@@ -321,6 +433,22 @@ fn diff_blocks(
                         "id {} now sits on content that previously carried id {} \
                          (markers look swapped or relocated)",
                         mid, src
+                    ),
+                    Some(mid.clone()),
+                    None,
+                ));
+            }
+            _ if moved_off(&b0.content, a, || {
+                window.get_or_insert_with(|| Window::new(&before_idx, before_blocks, after_blocks))
+            }) =>
+            {
+                findings.push(finding(
+                    Level::Error,
+                    "RELOCATED_ID",
+                    format!(
+                        "id {} now sits on different content, and its old text survives on \
+                         another block that carries no kept id (a block inserted above its marker?)",
+                        mid
                     ),
                     Some(mid.clone()),
                     None,

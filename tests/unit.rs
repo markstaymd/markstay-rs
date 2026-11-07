@@ -7,8 +7,9 @@
 // CommonMark-mode cases (SPEC.md §5.2) are deferred from the parser-free core.
 
 use markstay::{
-    best_match, body_hash, build_anchors, check_entries, has_errors, lint_diff, lint_document,
-    parse_document, resolve, CommitEntry, Finding, Selector, DEFAULT_MARGIN, DEFAULT_THRESHOLD,
+    best_match, body_hash, build_anchors, check_entries, disjoint_in, has_errors, lint_diff,
+    lint_document, parse_document, rank_matches, resolve, CommitEntry, Finding, Selector,
+    DEFAULT_MARGIN, DEFAULT_THRESHOLD, MERGE_CONTENDER_CAP,
 };
 
 fn codes_sorted(findings: &[Finding]) -> Vec<&'static str> {
@@ -346,6 +347,81 @@ fn quote_matcher_no_good_match_scores_below_threshold() {
         ["the quick brown fox jumps".to_string(), "a totally different sentence here".to_string()];
     let sel = Selector { quote: "completely unrelated text xyz".to_string(), ..Default::default() };
     assert!(best_match(&sel, &cands).score < 0.5);
+}
+
+#[test]
+fn rank_matches_first_two_entries_are_what_best_match_reports() {
+    let cands = [
+        "alpha beta gamma".to_string(),
+        "alpha beta delta".to_string(),
+        "unrelated words".to_string(),
+    ];
+    let sel = Selector {
+        quote: "alpha beta gamma".to_string(),
+        prefix: String::new(),
+        suffix: "unrelated".to_string(),
+    };
+    let ranked = rank_matches(&sel, &cands);
+    let bm = best_match(&sel, &cands);
+    assert_eq!(ranked.len(), 3);
+    assert_eq!(ranked[0].1 as i64, bm.index);
+    assert_eq!(ranked[0].0.min(1.0), bm.score);
+    assert_eq!(ranked[1].0.min(1.0), bm.runner_up);
+    assert!(rank_matches(&sel, &[]).is_empty());
+}
+
+// --- SPEC.md §9.1 merge exemption (v1.11). The corpus carries the placements;
+// these are the edges a vector cannot reach, because §9 scores an empty quote 0.
+
+#[test]
+fn merge_exemption_no_contenders_holds_an_empty_quote_fails() {
+    assert!(disjoint_in::<&str>(&[], "anything"));
+    assert!(!disjoint_in(&[""], "anything"));
+    assert!(!disjoint_in(&["any", "  \n "], "anything")); // empty once normalized
+}
+
+#[test]
+fn merge_exemption_cap_comes_first_at_16() {
+    assert_eq!(MERGE_CONTENDER_CAP, 16);
+    assert!(disjoint_in(&["a"; 16], &"a".repeat(16)));
+    assert!(!disjoint_in(&["a"; 17], &"a".repeat(40)));
+}
+
+#[test]
+fn merge_exemption_placement_is_disjoint_half_open_and_per_contender() {
+    assert!(disjoint_in(&["abcd", "bcde"], "abcdef abcd")); // greedy trap
+    assert!(disjoint_in(&["abc", "def"], "abcdef")); // spans touch
+    assert!(!disjoint_in(&["abcd", "cdef"], "abcdef xx")); // overlap only
+    assert!(!disjoint_in(&["same", "same"], "same")); // one copy, two quotes
+    assert!(disjoint_in(&["same", "same"], "same same"));
+}
+
+#[test]
+fn merge_exemption_normalizes_and_counts_code_points() {
+    assert!(disjoint_in(&["Alpha  Beta", "GAMMA"], "alpha beta\ngamma"));
+    // 15 code points of quotes in a 16-code-point block (27 and 28 UTF-8 bytes).
+    assert!(disjoint_in(
+        &["\u{1F600}\u{1F600} alpha", "\u{1F600}\u{1F600} beta"],
+        "\u{1F600}\u{1F600} alpha \u{1F600}\u{1F600} beta"
+    ));
+}
+
+#[test]
+fn resolve_repeated_anchor_id_resolves_the_last_anchor_read() {
+    let anchors = build_anchors(
+        "First block text.\n<!-- stay:x -->\n\nSecond block text.\n<!-- stay:x -->\n",
+    );
+    assert_eq!(anchors.len(), 2);
+    let res = resolve(
+        &anchors,
+        "First block text.\n\nSecond block text.\n",
+        DEFAULT_THRESHOLD,
+        DEFAULT_MARGIN,
+    );
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].id, "x");
+    assert_eq!(res[0].method, "hash");
+    assert_eq!(res[0].target, Some(1));
 }
 
 // --- write path: ported from impl/js/test/stamp.test.js (SPEC.md §3/§4/§6/§7/§8)
@@ -867,4 +943,57 @@ fn restamp_finds_no_hash_to_refresh_in_frontmatter() {
     let res = restamp(&edited, &RestampOptions::default());
     assert!(res.refreshed.is_empty());
     assert_eq!(res.text, edited);
+}
+
+// --- SPEC.md §5.3 (v1.11): the frontmatter-shaped span. Text and minted are
+// pinned by spec/stamp.json; these pin `StampResult::refused_frontmatter`, the
+// reporting field this core's stamp gained with its first refusal.
+
+const BLANK_PAYLOAD_SPAN: &str = "---\nname: demo\n\ndescription: two\n---\n\nBody text.\n";
+
+#[test]
+fn stamp_reports_a_frontmatter_shaped_span_and_stamps_what_follows_it() {
+    use markstay::LineSpan;
+    let r = stamp(BLANK_PAYLOAD_SPAN, &StampOptions::default(), counter("n"));
+    assert_eq!(r.refused_frontmatter, Some(LineSpan { start: 1, end: 5 }));
+    assert_eq!(r.minted.len(), 1);
+    assert_eq!(r.minted[0].line, 7);
+    let head: Vec<&str> = r.text.split('\n').take(5).collect();
+    assert_eq!(head, BLANK_PAYLOAD_SPAN.split('\n').take(5).collect::<Vec<_>>());
+    // A chunk that runs on past the closer starts in the span: refused whole,
+    // and the span is still named although nothing was minted.
+    let joined = "---\nname: demo\n\ndescription: two\n---\nBody right after.\n";
+    let j = stamp(joined, &StampOptions::default(), counter("n"));
+    assert_eq!(j.text, joined);
+    assert!(j.minted.is_empty());
+    assert_eq!(j.refused_frontmatter, Some(LineSpan { start: 1, end: 5 }));
+}
+
+#[test]
+fn refused_frontmatter_is_none_when_the_span_withholds_nothing() {
+    let opts = StampOptions::default();
+    assert_eq!(stamp("Body.\n", &opts, counter("n")).refused_frontmatter, None);
+    assert_eq!(
+        stamp("---\nname: demo\n---\n\nBody.\n", &opts, counter("n")).refused_frontmatter,
+        None
+    );
+    let marked =
+        "---\nname: demo\n<!-- stay:aa -->\n\ndescription: two\n---\n<!-- stay:bb -->\n\nBody.\n";
+    let r = stamp(marked, &opts, counter("n"));
+    assert_eq!(r.refused_frontmatter, None);
+    assert_eq!(r.minted.len(), 1);
+}
+
+#[test]
+fn the_frontmatter_refusal_leaves_parse_and_restamp_alone() {
+    let lines: Vec<usize> = parse_document(BLANK_PAYLOAD_SPAN)
+        .iter()
+        .filter(|b| b.index >= 0)
+        .map(|b| b.line)
+        .collect();
+    assert_eq!(lines, vec![1, 4, 7]);
+    let doc = "---\nname: demo\n<!-- stay:aa hash=sha256:0000 -->\n\nb: c\n---\n";
+    let r = restamp(doc, &RestampOptions::default());
+    assert_eq!(r.refreshed, vec!["aa".to_string()]);
+    assert!(!r.text.contains("hash=sha256:0000"));
 }

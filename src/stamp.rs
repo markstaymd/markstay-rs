@@ -22,7 +22,7 @@ use crate::markers::{
     find_hash_hex_span, find_markers, find_stay_span, is_id_byte, rewrite_markers, Marker, Syntax,
 };
 use crate::parse::parse_document;
-use crate::segment::{blank_frontmatter, segment_blank_line};
+use crate::segment::{blank_frontmatter, frontmatter_write_refusal, segment_blank_line};
 use crate::text::ascii_trim;
 
 /// Default truncation for a freshly written hash (§8 permits any prefix). 12 hex =
@@ -72,10 +72,24 @@ pub struct Renamed {
     pub to: String,
 }
 
+/// A leading span of 1-based lines, `start..=end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct StampResult {
     pub text: String,
     pub minted: Vec<Minted>,
+    /// The leading frontmatter-shaped span this run declined to write into
+    /// (SPEC.md §5.3): line 1 opens with `---`, the first later `---` or `...`
+    /// closes on line `end`, and recognition rejected the span only because its
+    /// YAML payload holds a blank line. `Some` only when the span withheld a stay
+    /// that would otherwise have been minted. The rest of the document is stamped
+    /// as usual.
+    pub refused_frontmatter: Option<LineSpan>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +235,8 @@ fn mint_unique(used: &mut BTreeSet<String>, new_id: &mut dyn FnMut() -> String) 
 }
 
 struct PendingBlock {
+    /// 1-based first line.
+    start: usize,
     last_line0: usize,
     content: String,
     has_id: bool,
@@ -239,6 +255,9 @@ struct PendingBlock {
 pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) -> StampResult {
     let norm = normalize_newlines(md);
     let blanked = blank_frontmatter(&norm).into_owned();
+    // SPEC.md §5.3 (v1.11): lines 1 to `frontmatter_end` are YAML to a frontmatter
+    // reader even though recognition rejected them, so nothing is inserted there.
+    let frontmatter_end = frontmatter_write_refusal(&norm);
     // SPEC.md §3.3, computed on the blanked text so it agrees line-for-line with
     // what `parse_document` sees. `open_after` is the writer's half of the rule: a
     // marker appended after a line a fence is still open on lands *inside the
@@ -299,6 +318,7 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
             let in_fence = fences.open_after.contains(&(start - 1))
                 || fences.open_after.contains(&(start + n_lines - 1));
             needs_stamp.push(PendingBlock {
+                start,
                 last_line0: start + n_lines - 2,
                 content,
                 has_id,
@@ -315,8 +335,16 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
 
     let mut insert_after: BTreeMap<usize, String> = BTreeMap::new();
     let mut minted: Vec<Minted> = Vec::new();
+    let mut frontmatter_withheld = false;
     for blk in &needs_stamp {
         if blk.has_id || blk.in_fence {
+            continue;
+        }
+        if frontmatter_end.is_some_and(|end| blk.start <= end) {
+            // SPEC.md §5.3: a block that starts in the span gets no minted stay,
+            // even a chunk that runs on past the closer into the body: a marker
+            // after it would bind to a block whose body is half YAML.
+            frontmatter_withheld = true;
             continue;
         }
         let id = mint_unique(&mut used, &mut new_id);
@@ -328,8 +356,10 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
         minted.push(Minted { id, line: blk.last_line0 + 1 });
     }
 
+    let refused_frontmatter =
+        frontmatter_end.filter(|_| frontmatter_withheld).map(|end| LineSpan { start: 1, end });
     if insert_after.is_empty() {
-        return StampResult { text: norm, minted: Vec::new() };
+        return StampResult { text: norm, minted: Vec::new(), refused_frontmatter };
     }
 
     let mut out = String::with_capacity(norm.len());
@@ -343,7 +373,7 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
             out.push_str(marker);
         }
     }
-    StampResult { text: out, minted }
+    StampResult { text: out, minted, refused_frontmatter }
 }
 
 /// Refresh hashes that no longer match their block (SPEC.md §8): the deliberate

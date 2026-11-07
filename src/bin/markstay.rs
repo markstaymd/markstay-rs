@@ -661,7 +661,10 @@ fn run_write(
         } else {
             print!("{}", out);
         }
-        eprintln!("{}: {}", f, note);
+        // A note may hold several lines; each is reported against its file.
+        for line in note.split('\n') {
+            eprintln!("{}: {}", f, line);
+        }
     }
     ExitCode::SUCCESS
 }
@@ -763,7 +766,17 @@ fn cmd_stamp(args: &[String]) -> ExitCode {
                 os_random(n).expect("system RNG verified by rng_preflight")
             })
         });
-        (res.text, format!("{} id(s) minted", res.minted.len()))
+        let mut note = format!("{} id(s) minted", res.minted.len());
+        if let Some(span) = res.refused_frontmatter {
+            // SPEC.md §5.3: the rest of the document is stamped and the exit status
+            // stays 0; this line is what makes the declined span visible and
+            // countable.
+            note.push_str(&format!(
+                "\nfrontmatter-shaped span L{}-L{} refused under §5.3, left unstamped",
+                span.start, span.end
+            ));
+        }
+        (res.text, note)
     })
 }
 

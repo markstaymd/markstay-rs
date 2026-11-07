@@ -124,3 +124,44 @@ fn exact_subhash_key_presence_is_independent_of_digest_validity() {
     );
     assert!(markers.iter().all(|m| m.subhash.is_none()));
 }
+
+#[test]
+fn line_count_runs_across_skipped_openers_crlf_and_offset() {
+    // Skipped: a non-marker comment, an unclosed MDX opener, a `--!>` close.
+    let text = "a\r\n<!-- note -->\r\n<!-- stay:x -->\r\n{/* stay:bad\r\n\r\
+                <!-- stay:y --!>\n<!-- stay:z -->";
+    let lines: Vec<(Option<String>, usize)> =
+        find_markers(text, 10).into_iter().map(|m| (m.id, m.line)).collect();
+    assert_eq!(lines, [(Some("x".into()), 13), (Some("z".into()), 17)]);
+    // The offset is added per emitted marker only, so no marker means no sum.
+    assert!(find_markers("no markers\n", usize::MAX).is_empty());
+}
+
+#[test]
+fn overlapping_unterminated_attributes_resume_after_each_host_closer() {
+    let mut text = "<!--stay:x a=".repeat(4000);
+    text.push_str("\r\n-->\r\n");
+    text.push_str(&"{/*stay:x a=".repeat(4000));
+    text.push_str("\r*/}\r<!-- stay:good hash=sha256:AbCd -->");
+    let markers = find_markers(&text, 7);
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].id.as_deref(), Some("good"));
+    assert_eq!(markers[0].hash.as_deref(), Some("abcd"));
+    assert_eq!(markers[0].line, 12);
+}
+
+#[test]
+fn overlapping_quoted_candidates_keep_multiline_escapes_and_host_boundaries() {
+    let outer = "<!-- stay:outer note=\"a\\\"\r\n{/* stay:inner note=bare */}\\\\\" -->";
+    let text = format!(
+        "<!--stay:bad a=<!--stay:bad a=\r\n--!>\r\n\
+         {{/* stay:bad a=<!-- stay:html note=\"x\r\ny\" -->\n*/}}\r{outer}"
+    );
+    let markers = find_markers(&text, 20);
+    assert_eq!(
+        markers.iter().map(|marker| marker.id.as_deref()).collect::<Vec<_>>(),
+        [Some("html"), Some("outer"), Some("inner")]
+    );
+    assert_eq!(markers.iter().map(|marker| marker.line).collect::<Vec<_>>(), [23, 26, 27]);
+    assert_eq!(markers[1].raw, outer);
+}

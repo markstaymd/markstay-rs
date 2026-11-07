@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.10-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.11-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.10), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.11), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -252,18 +252,28 @@ tests/
   and the content below it, blank-line segmentation reads one run and binds the
   marker to that content, so it is live rather than orphaned and deleting it drops
   a working id.
+- **A frontmatter-shaped span is not written into (§5.3, v1.11):** a leading `---`
+  span that recognition rejects only because its payload holds a blank line is content
+  to every reader here, and still YAML to a static site generator or a skill loader, so
+  a marker stamped into it breaks that file. `stamp` inserts no marker on lines 1 to
+  *n* (the first later `---` or `...`) and mints no stay for a block that starts on
+  them. The result's `refused_frontmatter` is `Some(LineSpan { start: 1, end: n })`
+  when the span withheld a stay, and `None` otherwise. Recognition does not change,
+  and `restamp` still refreshes a marker already inside the span.
 
 ## Conformance
 
 `tests/conformance.rs` loads the shared corpus at `../../conformance` (spec/ then
 gen/ then the optional profile tiers, never tree/) and recomputes every vector,
-comparing with a 1e-9 float tolerance and identical key sets. **469/469 core
-corpus vectors pass** (229 hand-authored `spec/` + 240 generated `gen/`, 22 files),
-incl. every `seqmatch` vector (143, with non-BMP) to delta 0 and the `stamp`/`mint`
-write-path vectors shared with JS/Python. The optional `rows` profile (SPEC.md §5.6
-table-row identity and §3.4 carrier refusals, 32 vectors) is **declined**: §16 keeps
+comparing with a 1e-9 float tolerance and identical key sets. **531/531 core
+corpus vectors pass** (291 hand-authored `spec/` + 240 generated `gen/`, 22 files),
+incl. every `seqmatch` vector (152, with non-BMP) to delta 0 and the `stamp`/`mint`
+write-path vectors shared with JS/Python. The optional profiles, `rows` (SPEC.md §5.6
+table-row identity and §3.4 carrier refusals, 32 vectors) and `items` (SPEC.md §5.5
+list-item recovery, §9.2 tier 0, and the §5.3 write refusal per item, 9 vectors), are
+**declined**: §16 keeps
 child segmentation optional and this implementation does not segment child blocks. The decline is
-asserted rather than implicit, so the test fails if the profile vanishes from the
+asserted rather than implicit, so the test fails if a profile vanishes from the
 corpus, if its vector count changes, or if a profile it has never heard of turns
 up. The `check` category carries 20 commit-shaped inputs and asserts baseline pairings,
 findings, moves, Markdown tracking departures, deletion notes, and scope. The
