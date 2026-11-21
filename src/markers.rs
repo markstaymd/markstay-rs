@@ -4,9 +4,10 @@
 //! string addresses the caller's original bytes. One scanner feeds discovery,
 //! stripping, fenced-code masking, and rewriting.
 
-use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+use crate::code::{marker_outside_code, CodeMask};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Syntax {
@@ -38,6 +39,11 @@ pub struct Marker {
     pub syntax: Syntax,
     /// 1-based line number after CRLF/lone-CR normalization.
     pub line: usize,
+    /// 0-based byte column of the opener (`<!--` or `{/*`) in its
+    /// LF-normalized line, which SPEC.md §3.5's span mask reads. Positional, like
+    /// `line`. The Python reference counts code points here and the JavaScript
+    /// one UTF-16 code units.
+    pub column: usize,
     pub malformed: bool,
     // Raw-relative spans used by write surgery. Keeping these on the parsed
     // marker prevents the writer from growing a second attribute grammar.
@@ -405,6 +411,7 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
     // Openers arrive in source order, so the line count advances with them.
     let mut newlines = 0usize;
     let mut counted_to = 0usize;
+    let mut line_start = 0usize;
     let mut find = Finders {
         html: ForwardFind::new(normalized, b"<!--"),
         mdx: ForwardFind::new(normalized, b"{/*"),
@@ -482,7 +489,11 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
                 }
             }
         }
-        newlines += normalized[counted_to..open_start].iter().filter(|&&b| b == b'\n').count();
+        let skipped = &normalized[counted_to..open_start];
+        newlines += skipped.iter().filter(|&&b| b == b'\n').count();
+        if let Some(last) = skipped.iter().rposition(|&b| b == b'\n') {
+            line_start = counted_to + last + 1;
+        }
         counted_to = open_start;
         let marker = Marker {
             id: parsed.as_ref().map(|p| p.id.clone()),
@@ -492,6 +503,7 @@ pub(crate) fn scan_marker_records(text: &str, line_offset: usize) -> Vec<MarkerR
             raw: text[raw_start..raw_end].to_string(),
             syntax,
             line: line_offset + (newlines + 1),
+            column: open_start - line_start,
             malformed,
             stay_span,
             hash_span,
@@ -537,15 +549,19 @@ pub fn strip_markers(text: &str) -> String {
     out
 }
 
-/// Rewrite non-overlapping valid markers outside the optional fenced-code mask.
-/// Ambiguous overlapping spans remain byte-for-byte unchanged.
-pub fn rewrite_markers<F>(text: &str, mut transform: F, code: Option<&BTreeSet<usize>>) -> String
+/// Rewrite non-overlapping valid markers outside the optional code mask (SPEC.md
+/// §3.3 fences and §3.5 closed inline code spans). Ambiguous overlapping spans
+/// remain byte-for-byte unchanged.
+pub fn rewrite_markers<F>(text: &str, mut transform: F, code: Option<&CodeMask>) -> String
 where
     F: FnMut(&Marker) -> Option<String>,
 {
+    // Marker-shaped text opening in code is not an active record. Filter it
+    // before overlap detection so it cannot suppress an independently
+    // recognized valid marker (§4).
     let records: Vec<MarkerRecord> = valid_records(text)
         .into_iter()
-        .filter(|record| !code.is_some_and(|lines| lines.contains(&record.marker.line)))
+        .filter(|record| code.is_none_or(|mask| marker_outside_code(&record.marker, mask)))
         .collect();
     let mut overlaps = alloc::vec![false; records.len()];
     for left in 0..records.len() {

@@ -15,7 +15,9 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::code::{code_lines, fence_state, strip_markers_outside_code};
+use crate::code::{
+    code_lines, fence_state, marker_outside_code, strip_markers_outside_code, CodeMask,
+};
 use crate::hash::{body_hash, normalize_newlines};
 use crate::id::is_id_charset;
 use crate::markers::{
@@ -264,7 +266,9 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     // listing*, which is how this project's own §4 grammar block acquired a real
     // marker in the middle of its ABNF.
     let fences = fence_state(&blanked);
-    let code = &fences.inside;
+    // §3.5: the closed inline code spans join the fence lines in the reader's
+    // mask, so a block quoting an example inline is unstamped like a fence.
+    let code = CodeMask::from_fence(&blanked, fences.inside.clone());
 
     // Existing ids across the whole document, so a minted id can't collide. The raw
     // scan is deliberate: an id shown in a fenced example is not an id, but minting
@@ -287,7 +291,7 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
     let mut needs_stamp: Vec<PendingBlock> = Vec::new();
     let mut current: Option<usize> = None;
     for (start, chunk) in segment_blank_line(&blanked) {
-        let stripped = strip_markers_outside_code(&chunk, code, start - 1);
+        let stripped = strip_markers_outside_code(&chunk, &code, start - 1);
         let content = ascii_trim(&stripped).to_string();
         // SPEC.md §16: a marker carrying `subhash` addresses a list item, so it never
         // makes the block around it stamped. Unconditional, like the guard in
@@ -296,8 +300,8 @@ pub fn stamp(md: &str, opts: &StampOptions, mut new_id: impl FnMut() -> String) 
         let has_id = find_markers(&chunk, start - 1).iter().any(|mk| {
             mk.id.is_some()
                 && mk.is_block_stay()
-                // §3.3: an example never stamps its block.
-                && !code.contains(&mk.line)
+                // §3.3, §3.5: an example never stamps its block.
+                && marker_outside_code(mk, &code)
         });
         if !content.is_empty() {
             let n_lines = chunk.split('\n').count();

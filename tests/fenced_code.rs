@@ -63,7 +63,7 @@ fn code_lines_recognises_the_fences_the_line_rule_can_see() {
         ("a\n~~~md `x`\ncode\n~~~\n", lines(&[2, 3, 4])),
     ];
     for (md, expected) in cases {
-        assert_eq!(code_lines(md), expected, "{md:?}");
+        assert_eq!(code_lines(md).fence, expected, "{md:?}");
     }
 }
 
@@ -77,7 +77,7 @@ fn crlf_and_lf_twins_give_the_same_mask() {
 fn a_fence_carrying_a_blockquote_marker_is_not_covered() {
     // §3.3 names this as the rule's real limit rather than hiding it: seeing this
     // fence means knowing the container, which is the parser §5.2 exists to avoid.
-    assert_eq!(code_lines("> ```\n> code\n> ```\n"), lines(&[]));
+    assert_eq!(code_lines("> ```\n> code\n> ```\n").fence, lines(&[]));
 }
 
 // --- reading (§3.3 reader rules, §8) --------------------------------------
@@ -119,11 +119,11 @@ fn a_marker_in_an_opening_fence_info_string_is_not_a_marker() {
 }
 
 #[test]
-fn an_inline_code_span_still_carries_a_marker() {
-    // §3.3 declines inline spans on purpose: that is the shape pandoc's native
-    // markdown writer produces when it mangles a trailing marker, and a mangled
-    // marker a tool can still see beats one that has silently stopped existing.
-    assert_eq!(marker_ids("A line showing `<!-- stay:demo -->` inline.\n"), ["demo"]);
+fn an_inline_code_span_is_content_since_v1_12() {
+    // §3.3 leaves inline spans to §3.5, which makes a closed one content too.
+    // pandoc's mangled form, a span followed by `{=html}`, stays a marker; both
+    // halves are pinned in code_spans.rs.
+    assert!(marker_ids("A line showing `<!-- stay:demo -->` inline.\n").is_empty());
 }
 
 // --- writing (§3.3 writer rules) ------------------------------------------
@@ -232,7 +232,7 @@ fn a_fence_opening_on_a_list_marker_line_swallows_the_rest_of_the_document() {
     // surprise. The variant where a later fence-shaped line *does* close the
     // phantom is the test below.
     let md = "- ```txt\n  code\n  ```\n\nA later paragraph.\n<!-- stay:live hash=sha256:dead -->\n";
-    assert_eq!(code_lines(md), lines(&[3, 4, 5, 6, 7]));
+    assert_eq!(code_lines(md).fence, lines(&[3, 4, 5, 6, 7]));
     assert!(marker_ids(md).is_empty());
     assert!(lint_document(md).1.is_empty());
     assert!(stamp(md, &StampOptions::default(), counter()).minted.is_empty());
@@ -244,7 +244,7 @@ fn a_fence_on_its_own_line_inside_a_list_item_is_seen_correctly() {
     // a defect in the rule: a balanced pair at one to three spaces of indent opens
     // and closes exactly where CommonMark puts it.
     let md = "- item:\n\n  ```py\n  code\n  ```\n\nAfter.\n<!-- stay:live -->\n";
-    assert_eq!(code_lines(md), lines(&[3, 4, 5]));
+    assert_eq!(code_lines(md).fence, lines(&[3, 4, 5]));
     assert_eq!(marker_ids(md), ["live"]);
 }
 
@@ -263,7 +263,7 @@ fn a_phantom_fence_that_later_closes_still_refuses_the_block_it_straddles() {
     // started" is the fail-closed side of a question the line scan cannot answer,
     // not a proxy that happens to be wrong here.
     let md = "- ```txt\n  code\n  ```\n\nA paragraph.\n```\nAfter.\n";
-    assert_eq!(code_lines(md), lines(&[3, 4, 5, 6]));
+    assert_eq!(code_lines(md).fence, lines(&[3, 4, 5, 6]));
     assert!(stamp(md, &StampOptions::default(), counter()).minted.is_empty());
 }
 

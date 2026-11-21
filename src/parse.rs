@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::code::code_lines;
+use crate::code::{code_lines, marker_outside_code};
 use crate::hash::normalize_newlines;
 use crate::markers::{scan_marker_records, Marker, MarkerRecord};
 use crate::segment::{blank_frontmatter, segment_blank_line};
@@ -116,16 +116,18 @@ pub(crate) fn strip_record_ranges<'a>(
 pub fn parse_document(md: &str) -> Vec<Block> {
     let normalized = normalize_newlines(md);
     let text = blank_frontmatter(&normalized).into_owned();
-    // SPEC.md §3.3: text inside a fenced code block is content. The rule is
-    // computed once over the whole document and threaded, on the
-    // `blank_frontmatter` precedent, because neither segmenter has a concept of a
-    // fence and `find_markers` is handed chunks. Blanking preserves line numbers,
-    // so this mask indexes the caller's text too.
+    // SPEC.md §3.3 and §3.5: text inside a fenced code block or a closed inline
+    // code span is content. The rule is computed once over the whole document and
+    // threaded, on the `blank_frontmatter` precedent, because neither segmenter
+    // has a concept of a fence and `find_markers` is handed chunks. Blanking
+    // preserves line numbers, so this mask indexes the caller's text too.
     let code = code_lines(&text);
     let chunks = segment_blank_line(&text);
     let document_records = document_marker_records(md, &normalized, &text);
-    let active_records: Vec<MarkerRecord> =
-        document_records.into_iter().filter(|record| !code.contains(&record.marker.line)).collect();
+    let active_records: Vec<MarkerRecord> = document_records
+        .into_iter()
+        .filter(|record| marker_outside_code(&record.marker, &code))
+        .collect();
     let removable_records: Vec<MarkerRecord> =
         active_records.iter().filter(|record| !record.marker.malformed).cloned().collect();
     let starts = line_starts(&text);
@@ -135,7 +137,7 @@ pub fn parse_document(md: &str) -> Vec<Block> {
     for (start, chunk) in chunks {
         let chunk_start = starts[start - 1];
         let chunk_end = chunk_start + chunk.len();
-        // §3.3: a marker-shaped string in a fence is content, not a marker.
+        // §3.3, §3.5: a marker-shaped string in code is content, not a marker.
         let markers: Vec<Marker> = active_records
             .iter()
             .filter(|record| chunk_start <= record.start && record.start < chunk_end)

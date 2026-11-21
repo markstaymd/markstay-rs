@@ -8,7 +8,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::code::code_lines;
+use crate::code::{code_lines, marker_outside_code};
 use crate::hash::{normalize_body, normalize_newlines};
 use crate::markers::MarkerRecord;
 use crate::parse::{document_marker_records, line_starts, strip_record_ranges};
@@ -156,7 +156,7 @@ fn adoption_view(md: &str, ids: &BTreeSet<&str>) -> View {
     let code = code_lines(&text);
     let records: Vec<MarkerRecord> = document_marker_records(md, &normalized, &text)
         .into_iter()
-        .filter(|r| !code.contains(&r.marker.line) && !r.marker.malformed)
+        .filter(|r| marker_outside_code(&r.marker, &code) && !r.marker.malformed)
         .collect();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for r in &records {

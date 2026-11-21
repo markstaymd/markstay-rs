@@ -1,4 +1,4 @@
-//! markstay Rust reference implementation, public API (SPEC.md v1.11, parser-free
+//! markstay Rust reference implementation, public API (SPEC.md v1.12, parser-free
 //! core). Mirrors the JS reference surface (impl/js/src/index.js) and the Python
 //! reference (linter/markstay_lint.py and eval/attachment/{quote,resolver}.py).
 //!
@@ -35,7 +35,9 @@ pub mod text;
 pub use hash::{body_hash, normalize_body};
 pub use text::ascii_trim;
 
-pub use code::{code_lines, fence_state, strip_markers_outside_code, FenceState};
+pub use code::{
+    code_lines, fence_state, marker_outside_code, strip_markers_outside_code, CodeMask, FenceState,
+};
 pub use markers::{find_markers, rewrite_markers, strip_markers, Marker, Syntax};
 pub use parse::{parse_document, Block};
 pub use segment::segment_blank_line;

@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/markstay)](https://crates.io/crates/markstay)
 [![docs.rs](https://img.shields.io/docsrs/markstay)](https://docs.rs/markstay)
 [![tests](https://img.shields.io/github/actions/workflow/status/markstaymd/markstay-rs/test.yml?label=tests)](https://github.com/markstaymd/markstay-rs/actions/workflows/test.yml)
-[![spec](https://img.shields.io/badge/spec-v1.11-blue)](https://markstay.org)
+[![spec](https://img.shields.io/badge/spec-v1.12-blue)](https://markstay.org)
 ![no_std](https://img.shields.io/badge/no__std-alloc-orange)
 ![License](https://img.shields.io/crates/l/markstay)
 
 A fourth, independent implementation of the [markstay spec](https://markstay.org)
-(v1.11), in zero-dependency Rust. markstay is a source-level identity primitive for
+(v1.12), in zero-dependency Rust. markstay is a source-level identity primitive for
 Markdown blocks: an id token that **stays** bound to its block across edits (marker
 `stay:`), so a reference to a block survives the document being rewritten,
 including by an LLM.
@@ -95,7 +95,8 @@ let resolutions = M::resolve(&anchors, after_md, M::DEFAULT_THRESHOLD, M::DEFAUL
 
 Public API (mirrors the JS `index.js` surface, snake_case): `normalize_body`,
 `body_hash`, `ascii_trim`, `find_markers`, `strip_markers`, `fence_state`,
-`code_lines`, `strip_markers_outside_code`, `segment_blank_line`,
+`code_lines` (a `CodeMask`), `marker_outside_code`, `strip_markers_outside_code`,
+`segment_blank_line`,
 `parse_document`, `lint_document`, `lint_blocks`, `lint_diff`, `lint_diff_blocks`,
 `sort_findings`, `has_errors`, `ratio`, `matching_blocks`, `normalize`,
 `quote_ratio`, `body_score`, `context_bonus`, `best_match`, `build_anchors`,
@@ -186,7 +187,8 @@ src/
   hash.rs      §8 normalization + SHA-256 body hashing
   text.rs      ASCII whitespace + ASCII case-fold helpers
   markers.rs   §3/§4 strict host-first grammar + discovery + rewrite
-  code.rs      §3.3 fenced-code mask (a marker in a fence is content)
+  code.rs      §3.3 fenced-code + §3.5 inline code-span mask (a marker in code
+               is content)
   segment.rs   §5 blank-line block segmentation
   parse.rs     §5 document -> content blocks with lexical marker tokens
   lint.rs      §7/§8/§10 lint + §11 regeneration diff
@@ -221,12 +223,51 @@ tests/
   rather than hidden**: a fence indented four spaces or carrying a blockquote or
   list-item prefix on the opening line is invisible to the line scan, so a marker
   after it can go silent. It fails closed (nothing is compared, the block just
-  looks unstamped) rather than corrupting anything. **Inline code spans are
-  deliberately out of scope**: a marker mangled into a span is still one a tool can
-  see, which beats one that has silently stopped existing. **Migration:** a
+  looks unstamped) rather than corrupting anything. Inline code spans are §3.5's,
+  below. **Migration:** a
   document whose body gained a fenced marker-shaped string drifts once and a
   `restamp` clears it; a fence whose only marker was an example is now unstamped
   and takes a fresh stay on the next `stamp`.
+- **A closed inline code span is content too (§3.5, v1.12):** a marker-shaped
+  string whose opener sits inside one identifies no block, stays in the hashed body,
+  and is never rewritten, so a review or tracker can quote an example inline, twice
+  on a line if it likes, without a duplicate id. `code_lines` returns a `CodeMask`:
+  `fence` holds the §3.3 lines, which is all a "is this line code" test reads, and
+  `spans` holds each line's span columns, which only `marker_outside_code` reads,
+  against `Marker::column`. Columns are **bytes** in the LF-normalized line, where
+  the Python reference counts code points and the JavaScript one UTF-16 code units;
+  the span and the marker share the unit, so a non-ASCII line gets the same verdict.
+  The scan pairs backtick runs of equal length on one line, over stretches that are
+  neither blank nor fenced, and stops for the rest of the stretch wherever
+  CommonMark or MDX could read the marker as a live comment: an unpaired run; a `<`
+  (tag or autolink) or `{` (MDX expression) outside spans and outside HTML-form
+  markers whose body holds none of `<`, `[`, `]`, `{` or `--` (an MDX-form marker
+  is read like text, so its own `{` stops the scan); a `]`
+  followed by `(`, `[` or `:` (a destination, title, reference label or
+  definition), except an ordinary link whose destination or label closes before the
+  next run and holds none of `` ` < { ( [ \ " ' `` (a label's closing `]` is
+  then examined again, since it may open a destination itself); a `[` left open
+  before the next run, which a `]` after a nested `[` or a backslash does not
+  close; a backtick run anywhere inside a marker-shaped string, from opener to
+  closer; a backslash-escaped backtick; or a line opening an HTML block, which runs
+  to its end condition (types 1 to 5, across blank lines) or a blank line, and then
+  to the next blank line, with every type 1 to 5 opener met inside it tracked too,
+  since the container may have ended and a new block begun. A span holding a `|`
+  stops the scan too, since GFM splits table cells first and the runs after it may
+  pair across a cell boundary. A span followed by `{=html}` (pandoc's raw-inline
+  form) stays live and the scan goes on. Every rule can only leave a marker live, so a quote the scan
+  cannot be sure of stays a marker rather than a stay going silent. **Migration:** a
+  block that quotes a marker inline next to its own stay drifts once and a `restamp`
+  clears it; a block whose only stay was a quote is unstamped and takes a fresh one
+  on the next `stamp`. **API break (0.x):** `code_lines` returns a `CodeMask`
+  rather than a `BTreeSet<usize>`, `strip_markers_outside_code` takes
+  `&CodeMask`, and `rewrite_markers` takes `Option<&CodeMask>`. `CodeMask` keeps
+  only `contains(&line)`, which reads the fence half, and `is_empty()`, which counts
+  both halves; the rest of the `BTreeSet` surface (`iter`, `len`, `insert`,
+  `IntoIterator`, comparison with a `BTreeSet`) lives on its `fence` field, and
+  `==` between two masks compares the spans too. Code holding a fence-line set
+  migrates with `CodeMask { fence, ..Default::default() }`, which masks fences
+  and no spans.
 - **Leading YAML frontmatter is metadata, not a block (§5.3):** it is skipped before
   segmentation, so it is never a block, never stamped, and never hashed , a
   metadata-only edit (`status: draft` -> `status: done`) must not read as a content
@@ -265,11 +306,11 @@ tests/
 
 `tests/conformance.rs` loads the shared corpus at `../../conformance` (spec/ then
 gen/ then the optional profile tiers, never tree/) and recomputes every vector,
-comparing with a 1e-9 float tolerance and identical key sets. **531/531 core
-corpus vectors pass** (291 hand-authored `spec/` + 240 generated `gen/`, 22 files),
+comparing with a 1e-9 float tolerance and identical key sets. **580/580 core
+corpus vectors pass** (340 hand-authored `spec/` + 240 generated `gen/`, 22 files),
 incl. every `seqmatch` vector (152, with non-BMP) to delta 0 and the `stamp`/`mint`
 write-path vectors shared with JS/Python. The optional profiles, `rows` (SPEC.md §5.6
-table-row identity and §3.4 carrier refusals, 32 vectors) and `items` (SPEC.md §5.5
+table-row identity and §3.4 carrier refusals, 34 vectors) and `items` (SPEC.md §5.5
 list-item recovery, §9.2 tier 0, and the §5.3 write refusal per item, 9 vectors), are
 **declined**: §16 keeps
 child segmentation optional and this implementation does not segment child blocks. The decline is

@@ -125,11 +125,11 @@ const VERIFIED_CATEGORIES: &[&str] = &[
 //
 // SPEC.md §16 keeps §5.5 and §5.6 child segmentation OPTIONAL, and only the
 // Python reference implements it, so declining `items` and `rows` is
-// conforming. Running 530 of the 531 core vectors would not be, which is why the
+// conforming. Running 579 of the 580 core vectors would not be, which is why the
 // core count is asserted rather than left to whatever happens to be on disk.
 const KNOWN_PROFILES: &[&str] = &["rows", "items"];
 const ADVERTISED_PROFILES: &[&str] = &[];
-const CORE_VECTORS: usize = 531;
+const CORE_VECTORS: usize = 580;
 
 fn verify(category: &str, v: &Value) -> (Value, Value) {
     match category {
@@ -509,7 +509,7 @@ fn corpus() {
     assert_eq!(total, CORE_VECTORS, "core corpus vector count");
     assert_eq!(
         declined,
-        vec!["items:9".to_string(), "rows:32".to_string()],
+        vec!["items:9".to_string(), "rows:34".to_string()],
         "declined optional profiles"
     );
 
